@@ -76,6 +76,7 @@ class CNNEncoder(nn.Module):
         ])
         
     def forward(self, x):
+        # Input shape: [batch, channels, sequence]
         for block in self.cnn_blocks:
             x = block(x)
         return x
@@ -116,9 +117,14 @@ class CNNLSTMFusion(nn.Module):
         )
         
     def forward(self, emg, eeg):
-        # Permute input tensors to [batch, channels, sequence]
-        emg = emg.permute(0, 2, 1)  # from [batch, sequence, channels] to [batch, channels, sequence]
-        eeg = eeg.permute(0, 2, 1)  # from [batch, sequence, channels] to [batch, channels, sequence]
+        # Input shapes: [batch, sequence, channels]
+        # Need to permute to: [batch, channels, sequence]
+        emg = emg.transpose(1, 2)  # [batch, channels, sequence]
+        eeg = eeg.transpose(1, 2)  # [batch, channels, sequence]
+        
+        # Print shapes for debugging
+        # print(f"EMG shape after transpose: {emg.shape}")
+        # print(f"EEG shape after transpose: {eeg.shape}")
         
         # CNN feature extraction
         emg_features = self.emg_encoder(emg)
@@ -130,7 +136,7 @@ class CNNLSTMFusion(nn.Module):
         # Reshape for LSTM
         batch_size = combined.size(0)
         seq_len = combined.size(2)
-        combined = combined.permute(0, 2, 1)  # [batch, seq_len, features]
+        combined = combined.transpose(1, 2)  # [batch, seq_len, features]
         
         # LSTM processing
         lstm_out, _ = self.lstm(combined)
