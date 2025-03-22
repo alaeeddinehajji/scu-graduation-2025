@@ -60,6 +60,13 @@ TRAIN_TEST_SPLIT = 0.2
 VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42
 
+# New hyperparameters
+WARMUP_EPOCHS = 5
+DROPOUT_RATE = 0.3
+ATTENTION_HEADS = 4
+AUGMENTATION_PROB = 0.5
+LABEL_SMOOTHING = 0.1
+
 # %% [markdown]
 # ## Cell 3: Helper Functions
 # Define data loading and training functions
@@ -158,16 +165,43 @@ def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
     
     return emg_windows, eeg_windows, window_labels, sample_ids
 
+def augment_signal(signal, prob=AUGMENTATION_PROB):
+    """Apply various augmentations to the signal."""
+    if random.random() < prob:
+        # Random scaling
+        scale = random.uniform(0.8, 1.2)
+        signal = signal * scale
+    
+    if random.random() < prob:
+        # Add Gaussian noise
+        noise = torch.randn_like(signal) * 0.05
+        signal = signal + noise
+    
+    if random.random() < prob:
+        # Random time shift
+        shift = random.randint(-10, 10)
+        signal = torch.roll(signal, shifts=shift, dims=-1)
+    
+    return signal
+
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=NUM_EPOCHS):
     print("Starting training...")
     best_val_acc = 0.0
     scaler = GradScaler()
+    
+    # Learning rate warmup
+    warmup_factor = LEARNING_RATE / WARMUP_EPOCHS
     
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
+        
+        # Warmup learning rate
+        if epoch < WARMUP_EPOCHS:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_factor * (epoch + 1)
         
         for emg, eeg, labels in train_loader:
             emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
@@ -176,9 +210,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             
             with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                 outputs = model(emg, eeg)
-                loss = criterion(outputs, labels)
+                # Label smoothing
+                loss = criterion(outputs, labels) * (1 - LABEL_SMOOTHING) + \
+                       LABEL_SMOOTHING * torch.mean(outputs) / num_classes
             
             scaler.scale(loss).backward()
+            
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             scaler.step(optimizer)
             scaler.update()
             
@@ -186,8 +227,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             _, predicted = outputs.max(1)
             train_total += labels.size(0)
             train_correct += predicted.eq(labels).sum().item()
-            
-        scheduler.step()
+        
+        if epoch >= WARMUP_EPOCHS:
+            scheduler.step()
         
         # Validation
         model.eval()
@@ -232,22 +274,27 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
 # %%
 class MultimodalDataset(Dataset):
-    def __init__(self, emg_data, eeg_data, labels, time_shift=DELTA_T):
-        # Data is already in shape (n_windows, n_channels, window_size)
+    def __init__(self, emg_data, eeg_data, labels, time_shift=DELTA_T, augment=False):
         self.emg_data = torch.FloatTensor(emg_data)
         self.eeg_data = torch.FloatTensor(eeg_data)
         self.labels = torch.LongTensor(labels)
         self.time_shift = time_shift
+        self.augment = augment
         
     def __len__(self):
         return len(self.labels)
     
     def __getitem__(self, idx):
-        # Shift EMG data by DELTA_T
-        emg = self.emg_data[idx]  # Shape: (n_channels, window_size)
-        eeg = self.eeg_data[idx]  # Shape: (n_channels, window_size)
+        emg = self.emg_data[idx]
+        eeg = self.eeg_data[idx]
+        
+        if self.augment:
+            emg = augment_signal(emg)
+            eeg = augment_signal(eeg)
+        
         if self.time_shift > 0:
             emg = F.pad(emg[:, self.time_shift:], (0, self.time_shift))
+        
         return emg, eeg, self.labels[idx]
 
 # %% [markdown]
@@ -255,33 +302,69 @@ class MultimodalDataset(Dataset):
 # Define the CNN blocks and encoder components
 
 # %%
-class CNNBlock(nn.Module):
+class ResidualCNNBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(CNNBlock, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm1d(out_channels),
-            nn.ELU(),
-            nn.AvgPool1d(2)
-        )
+        super(ResidualCNNBlock, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        
+        # Residual connection
+        self.downsample = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=1),
+            nn.BatchNorm1d(out_channels)
+        ) if in_channels != out_channels else nn.Identity()
+        
+        self.relu = nn.ELU()
+        self.pool = nn.AvgPool1d(2)
+        self.dropout = nn.Dropout(DROPOUT_RATE)
         
     def forward(self, x):
-        return self.conv(x)
+        identity = self.downsample(x)
+        
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        out += identity
+        out = self.relu(out)
+        out = self.pool(out)
+        
+        return out
 
-class CNNEncoder(nn.Module):
-    def __init__(self, input_channels, hidden_dim):
-        super(CNNEncoder, self).__init__()
-        self.cnn_blocks = nn.ModuleList([
-            CNNBlock(input_channels, hidden_dim),
-            CNNBlock(hidden_dim, hidden_dim * 2),
-            CNNBlock(hidden_dim * 2, hidden_dim * 4),
-            CNNBlock(hidden_dim * 4, hidden_dim * 8)
-        ])
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=DROPOUT_RATE)
+        self.norm = nn.LayerNorm(embed_dim)
         
     def forward(self, x):
-        # Input shape: [batch, channels, sequence]
-        for block in self.cnn_blocks:
+        # Reshape for attention [seq_len, batch, embed_dim]
+        x = x.permute(2, 0, 1)
+        attn_out, _ = self.attention(x, x, x)
+        attn_out = attn_out.permute(1, 2, 0)  # Back to [batch, embed_dim, seq_len]
+        return self.norm(x.permute(1, 2, 0) + attn_out)
+
+class ImprovedCNNEncoder(nn.Module):
+    def __init__(self, input_channels, hidden_dim):
+        super(ImprovedCNNEncoder, self).__init__()
+        self.blocks = nn.ModuleList([
+            ResidualCNNBlock(input_channels, hidden_dim),
+            ResidualCNNBlock(hidden_dim, hidden_dim * 2),
+            ResidualCNNBlock(hidden_dim * 2, hidden_dim * 4),
+            ResidualCNNBlock(hidden_dim * 4, hidden_dim * 8)
+        ])
+        self.attention = MultiHeadAttention(hidden_dim * 8, ATTENTION_HEADS)
+        
+    def forward(self, x):
+        for block in self.blocks:
             x = block(x)
+        x = self.attention(x)
         return x
 
 # %% [markdown]
@@ -289,64 +372,66 @@ class CNNEncoder(nn.Module):
 # Implementation of the CNNLSTMFusion model combining EMG and EEG features
 
 # %%
-class CNNLSTMFusion(nn.Module):
+class ImprovedCNNLSTMFusion(nn.Module):
     def __init__(self, emg_channels, eeg_channels, hidden_dim, num_classes):
-        super(CNNLSTMFusion, self).__init__()
+        super(ImprovedCNNLSTMFusion, self).__init__()
         
-        # CNN Encoders
-        self.emg_encoder = CNNEncoder(emg_channels, hidden_dim)
-        self.eeg_encoder = CNNEncoder(eeg_channels, hidden_dim)
+        # Improved encoders
+        self.emg_encoder = ImprovedCNNEncoder(emg_channels, hidden_dim)
+        self.eeg_encoder = ImprovedCNNEncoder(eeg_channels, hidden_dim)
         
-        # LSTM layers
-        lstm_input_dim = hidden_dim * 8 * 2  # Combined features from both modalities
+        # Cross-modal attention
+        self.cross_attention = MultiHeadAttention(hidden_dim * 8, ATTENTION_HEADS)
+        
+        # LSTM with residual connections
+        lstm_input_dim = hidden_dim * 8 * 2
         self.lstm = nn.LSTM(
             input_size=lstm_input_dim,
             hidden_size=hidden_dim * 4,
             num_layers=2,
             batch_first=True,
-            dropout=0.3,
+            dropout=DROPOUT_RATE,
             bidirectional=True
         )
         
-        # Dropout for regularization
-        self.dropout = nn.Dropout(0.5)
-        
-        # Final classification layers
+        # Improved classifier
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 8, hidden_dim * 4),
             nn.LayerNorm(hidden_dim * 4),
             nn.ELU(),
-            nn.Dropout(0.3),
+            nn.Dropout(DROPOUT_RATE),
             nn.Linear(hidden_dim * 4, hidden_dim * 2),
             nn.LayerNorm(hidden_dim * 2),
             nn.ELU(),
-            nn.Dropout(0.2),
+            nn.Dropout(DROPOUT_RATE * 0.8),
             nn.Linear(hidden_dim * 2, num_classes)
         )
         
     def forward(self, emg, eeg):
-        # Input shapes are already [batch, channels, sequence]
-        
-        # CNN feature extraction
+        # Extract features
         emg_features = self.emg_encoder(emg)
         eeg_features = self.eeg_encoder(eeg)
         
-        # Combine features
+        # Cross-modal attention
         combined = torch.cat((emg_features, eeg_features), dim=1)
-        
-        # Reshape for LSTM
-        batch_size = combined.size(0)
-        seq_len = combined.size(2)
-        combined = combined.permute(0, 2, 1)  # [batch, seq_len, features]
+        combined = self.cross_attention(combined)
         
         # LSTM processing
+        batch_size = combined.size(0)
+        seq_len = combined.size(2)
+        combined = combined.permute(0, 2, 1)
+        
         lstm_out, _ = self.lstm(combined)
         
-        # Take the last output
-        lstm_out = lstm_out[:, -1, :]
+        # Global average pooling and max pooling
+        avg_pool = torch.mean(lstm_out, dim=1)
+        max_pool, _ = torch.max(lstm_out, dim=1)
+        
+        # Combine pooling results
+        pooled = (avg_pool + max_pool) / 2
         
         # Classification
-        output = self.classifier(lstm_out)
+        output = self.classifier(pooled)
         
         return output
 
@@ -388,9 +473,9 @@ print(f"Test: EMG {X_emg_test.shape}, EEG {X_eeg_test.shape}")
 
 # %%
 # Create datasets
-train_dataset = MultimodalDataset(X_emg_train, X_eeg_train, y_train)
-val_dataset = MultimodalDataset(X_emg_val, X_eeg_val, y_val)
-test_dataset = MultimodalDataset(X_emg_test, X_eeg_test, y_test)
+train_dataset = MultimodalDataset(X_emg_train, X_eeg_train, y_train, augment=True)
+val_dataset = MultimodalDataset(X_emg_val, X_eeg_val, y_val, augment=False)
+test_dataset = MultimodalDataset(X_emg_test, X_eeg_test, y_test, augment=False)
 
 # Create dataloaders
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
@@ -406,7 +491,7 @@ print("Data loaders created successfully")
 # %%
 # Initialize model
 num_classes = len(np.unique(labels))
-model = CNNLSTMFusion(
+model = ImprovedCNNLSTMFusion(
     emg_channels=8,
     eeg_channels=8,
     hidden_dim=HIDDEN_DIM,
