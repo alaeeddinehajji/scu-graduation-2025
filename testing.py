@@ -60,7 +60,7 @@ class EMGEncoder(nn.Module):
         self.gap = nn.AdaptiveAvgPool1d(1)
         self.gmp = nn.AdaptiveMaxPool1d(1)
         
-        # Final projection
+        # Final projection updated to maintain dimensionality
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim*8, hidden_dim*4),
             nn.LayerNorm(hidden_dim*4),
@@ -87,12 +87,12 @@ class EMGEncoder(nn.Module):
         x = self.attention(x)
         
         # Global pooling
-        avg_pool = self.gap(x).squeeze(-1)
-        max_pool = self.gmp(x).squeeze(-1)
+        avg_pool = self.gap(x).squeeze(-1)  # [batch_size, hidden_dim*4]
+        max_pool = self.gmp(x).squeeze(-1)  # [batch_size, hidden_dim*4]
         
         # Concatenate and project
-        x = torch.cat([avg_pool, max_pool], dim=1)
-        x = self.output_proj(x)
+        x = torch.cat([avg_pool, max_pool], dim=1)  # [batch_size, hidden_dim*8]
+        x = self.output_proj(x)  # [batch_size, hidden_dim*4]
         
         return x
 
@@ -118,7 +118,7 @@ class EEGEncoder(nn.Module):
         self.gap = nn.AdaptiveAvgPool1d(1)
         self.gmp = nn.AdaptiveMaxPool1d(1)
         
-        # Final projection
+        # Final projection updated to maintain dimensionality
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim*8, hidden_dim*4),
             nn.LayerNorm(hidden_dim*4),
@@ -145,12 +145,12 @@ class EEGEncoder(nn.Module):
         x = self.attention(x)
         
         # Global pooling
-        avg_pool = self.gap(x).squeeze(-1)
-        max_pool = self.gmp(x).squeeze(-1)
+        avg_pool = self.gap(x).squeeze(-1)  # [batch_size, hidden_dim*4]
+        max_pool = self.gmp(x).squeeze(-1)  # [batch_size, hidden_dim*4]
         
         # Concatenate and project
-        x = torch.cat([avg_pool, max_pool], dim=1)
-        x = self.output_proj(x)
+        x = torch.cat([avg_pool, max_pool], dim=1)  # [batch_size, hidden_dim*8]
+        x = self.output_proj(x)  # [batch_size, hidden_dim*4]
         
         return x
 
@@ -233,15 +233,29 @@ class CrossAttention(nn.Module):
         self.scale = dim ** -0.5
         
     def forward(self, x1, x2):
-        q = self.query(x1)
-        k = self.key(x2)
-        v = self.value(x2)
+        # Add batch dimension if needed
+        if x1.dim() == 2:
+            x1 = x1.unsqueeze(1)
+        if x2.dim() == 2:
+            x2 = x2.unsqueeze(1)
+            
+        # x1, x2 shape: [batch_size, seq_len, dim]
+        q = self.query(x1)  # [batch_size, seq_len, dim]
+        k = self.key(x2)    # [batch_size, seq_len, dim]
+        v = self.value(x2)  # [batch_size, seq_len, dim]
         
-        attn = torch.bmm(q, k.transpose(-2, -1)) * self.scale
+        # Compute attention scores
+        attn = torch.bmm(q, k.transpose(-2, -1)) * self.scale  # [batch_size, seq_len, seq_len]
         attn = F.softmax(attn, dim=-1)
         
-        out = torch.bmm(attn, v)
-        return out + x1  # Residual connection
+        # Apply attention to values
+        out = torch.bmm(attn, v)  # [batch_size, seq_len, dim]
+        
+        # Remove sequence dimension if it was added
+        if x1.size(1) == 1:
+            out = out.squeeze(1)
+            
+        return out + x1.squeeze(1) if x1.size(1) == 1 else out  # Residual connection
 
 # Define the improved multimodal fusion network
 class MultimodalNet(nn.Module):
@@ -267,15 +281,15 @@ class MultimodalNet(nn.Module):
         
     def forward(self, emg, eeg):
         # Extract features from both modalities
-        emg_features = self.emg_encoder(emg)
-        eeg_features = self.eeg_encoder(eeg)
+        emg_features = self.emg_encoder(emg)  # [batch_size, hidden_dim*4]
+        eeg_features = self.eeg_encoder(eeg)  # [batch_size, hidden_dim*4]
         
         # Cross-attention between modalities
-        emg_attended = self.cross_attention(emg_features, eeg_features)
-        eeg_attended = self.cross_attention(eeg_features, emg_features)
+        emg_attended = self.cross_attention(emg_features, eeg_features)  # [batch_size, hidden_dim*4]
+        eeg_attended = self.cross_attention(eeg_features, emg_features)  # [batch_size, hidden_dim*4]
         
         # Concatenate attended features
-        combined = torch.cat((emg_attended, eeg_attended), dim=1)
+        combined = torch.cat((emg_attended, eeg_attended), dim=-1)  # [batch_size, hidden_dim*8]
         
         # Final classification
         output = self.fusion(combined)
