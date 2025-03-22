@@ -116,6 +116,10 @@ class CNNLSTMFusion(nn.Module):
         )
         
     def forward(self, emg, eeg):
+        # Permute input tensors to [batch, channels, sequence]
+        emg = emg.permute(0, 2, 1)  # from [batch, sequence, channels] to [batch, channels, sequence]
+        eeg = eeg.permute(0, 2, 1)  # from [batch, sequence, channels] to [batch, channels, sequence]
+        
         # CNN feature extraction
         emg_features = self.emg_encoder(emg)
         eeg_features = self.eeg_encoder(eeg)
