@@ -149,7 +149,6 @@ def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
     # Extract features and labels
     emg_features = emg_data.iloc[:, :8].values  # 8 EMG channels
     eeg_features = eeg_data.iloc[:, :8].values  # 8 EEG channels
-    labels = emg_data['gesture'].values - 1  # 0-indexed labels
     
     # Standardize features
     print("Normalizing data...")
@@ -163,13 +162,74 @@ def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
     emg_windows = []
     eeg_windows = []
     window_labels = []
+    sample_ids = []  # Track sample IDs for stratified splits
     
-    for i in range(0, len(emg_features) - window_size, window_size // 2):
-        emg_windows.append(emg_features[i:i + window_size])
-        eeg_windows.append(eeg_features[i:i + window_size])
-        window_labels.append(labels[i + window_size // 2])  # Use middle of window
+    # Find common samples between EMG and EEG data
+    emg_samples = set(tuple(x) for x in emg_data[['subject', 'repetition', 'gesture']].drop_duplicates().values)
+    eeg_samples = set(tuple(x) for x in eeg_data[['subject', 'repetition', 'gesture']].drop_duplicates().values)
+    common_samples = emg_samples.intersection(eeg_samples)
     
-    return np.array(emg_windows), np.array(eeg_windows), np.array(window_labels)
+    print(f"Found {len(common_samples)} common samples between EMG and EEG data.")
+    
+    for sample in common_samples:
+        subject, repetition, gesture = sample
+        
+        # Get data for this sample
+        emg_sample = emg_data[(emg_data['subject'] == subject) & 
+                             (emg_data['repetition'] == repetition) & 
+                             (emg_data['gesture'] == gesture)]
+        
+        eeg_sample = eeg_data[(eeg_data['subject'] == subject) & 
+                             (eeg_data['repetition'] == repetition) & 
+                             (eeg_data['gesture'] == gesture)]
+        
+        # Make sure both samples have data
+        if len(emg_sample) == 0 or len(eeg_sample) == 0:
+            continue
+            
+        # Extract features
+        emg_sample_features = emg_sample.iloc[:, :8].values
+        eeg_sample_features = eeg_sample.iloc[:, :8].values
+        
+        # Standardize using pre-fitted scalers
+        emg_sample_features = emg_scaler.transform(emg_sample_features)
+        eeg_sample_features = eeg_scaler.transform(eeg_sample_features)
+        
+        # Handle different lengths by using the shorter one
+        min_length = min(len(emg_sample_features), len(eeg_sample_features))
+        if min_length <= window_size:
+            continue  # Skip if sample is too short
+            
+        emg_sample_features = emg_sample_features[:min_length]
+        eeg_sample_features = eeg_sample_features[:min_length]
+        
+        # Create windows with fixed size
+        for i in range(0, min_length - window_size, window_size // 2):
+            emg_window = emg_sample_features[i:i + window_size]
+            eeg_window = eeg_sample_features[i:i + window_size]
+            
+            # Only add if window is complete
+            if len(emg_window) == window_size and len(eeg_window) == window_size:
+                emg_windows.append(emg_window)
+                eeg_windows.append(eeg_window)
+                window_labels.append(gesture - 1)  # 0-indexed labels
+                sample_ids.append(f"{subject}_{repetition}_{gesture}")
+    
+    if len(emg_windows) == 0:
+        raise ValueError("No valid windows could be created. Check your data alignment.")
+    
+    print(f"Created {len(emg_windows)} windows from {len(common_samples)} samples.")
+    
+    # Convert to numpy arrays with explicit shape checking
+    emg_windows = np.array(emg_windows)  # Shape: (n_windows, window_size, n_channels)
+    eeg_windows = np.array(eeg_windows)  # Shape: (n_windows, window_size, n_channels)
+    window_labels = np.array(window_labels)
+    sample_ids = np.array(sample_ids)
+    
+    print(f"EMG windows shape: {emg_windows.shape}")
+    print(f"EEG windows shape: {eeg_windows.shape}")
+    
+    return emg_windows, eeg_windows, window_labels, sample_ids
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=NUM_EPOCHS):
     print("Starting training...")
@@ -241,7 +301,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
 def main():
     # Load and preprocess data
-    emg_data, eeg_data, labels = load_and_preprocess_data(
+    emg_data, eeg_data, labels, sample_ids = load_and_preprocess_data(
         'data/processed/EMG-data.csv',
         'data/processed/EEG-data.csv'
     )
