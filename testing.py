@@ -42,7 +42,7 @@ print(f"Using device: {device}")
 # Data paths
 EMG_DATA_PATH = 'data/processed/EMG-data.csv'
 EEG_DATA_PATH = 'data/processed/EEG-data.csv'
-MODEL_SAVE_PATH = 'best_model.pth'
+MODEL_SAVE_PATH = 'models/multimodal_eeg_emg/best_model.pth'
 
 # Data processing parameters
 DELTA_T = 35  # Time difference between EEG and EMG in ms
@@ -623,7 +623,7 @@ for epoch in range(NUM_EPOCHS):
     
     # Save if it's among the best checkpoints
     if (val_acc, epoch) >= (best_checkpoints[-1][0], best_checkpoints[-1][1]):
-        torch.save(checkpoint, f"{MODEL_SAVE_PATH}.{len(best_checkpoints)}")
+        torch.save(checkpoint, f"models/multimodal_eeg_emg/checkpoint_{len(best_checkpoints)}.pth")
         print(f'Saved checkpoint with validation accuracy: {val_acc:.2f}%')
         
         if val_acc > best_val_acc:
@@ -642,19 +642,10 @@ for i, (acc, epoch, _) in enumerate(best_checkpoints, 1):
 # Plot training history
 import matplotlib.pyplot as plt
 
-plt.figure(figsize=(20, 5))
+plt.figure(figsize=(20, 10))  # Adjusted figure size for better 2x2 layout
 
-# Plot losses
-plt.subplot(1, 4, 1)
-plt.plot(history['train_loss'], label='Train Loss')
-plt.plot(history['val_loss'], label='Val Loss')
-plt.title('Loss History')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-
-# Plot accuracies
-plt.subplot(1, 4, 2)
+# Plot accuracies (top left)
+plt.subplot(2, 2, 1)
 plt.plot(history['train_acc'], label='Train Acc')
 plt.plot(history['val_acc'], label='Val Acc')
 plt.title('Accuracy History')
@@ -662,16 +653,25 @@ plt.xlabel('Epoch')
 plt.ylabel('Accuracy (%)')
 plt.legend()
 
-# Plot F1 scores
-plt.subplot(1, 4, 3)
+# Plot losses (top right)
+plt.subplot(2, 2, 2)
+plt.plot(history['train_loss'], label='Train Loss')
+plt.plot(history['val_loss'], label='Val Loss')
+plt.title('Loss History')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+# Plot F1 scores (bottom left)
+plt.subplot(2, 2, 3)
 plt.plot(history['val_f1'], label='Validation F1')
 plt.title('F1 Score History')
 plt.xlabel('Epoch')
 plt.ylabel('F1 Score')
 plt.legend()
 
-# Plot learning rate
-plt.subplot(1, 4, 4)
+# Plot learning rate (bottom right)
+plt.subplot(2, 2, 4)
 plt.plot(history['lr'])
 plt.title('Learning Rate Schedule')
 plt.xlabel('Epoch')
