@@ -340,6 +340,7 @@ class ResidualCNNBlock(nn.Module):
 class MultiHeadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
         super(MultiHeadAttention, self).__init__()
+        self.embed_dim = embed_dim
         self.attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=DROPOUT_RATE)
         self.norm = nn.LayerNorm([embed_dim])
         
@@ -347,23 +348,31 @@ class MultiHeadAttention(nn.Module):
         # Input shape: [batch, channels, seq_len]
         batch_size, channels, seq_len = x.size()
         
-        # Reshape for attention [seq_len, batch, channels]
+        # Check if we need to project the channels dimension
+        if channels != self.embed_dim:
+            # Add a projection layer
+            projection = nn.Linear(channels, self.embed_dim).to(x.device)
+            x = x.permute(0, 2, 1)  # [batch, seq_len, channels]
+            x = projection(x)
+            x = x.permute(0, 2, 1)  # [batch, embed_dim, seq_len]
+        
+        # Reshape for attention [seq_len, batch, embed_dim]
         x_reshaped = x.permute(2, 0, 1)
         
         # Apply self-attention
         attn_out, _ = self.attention(x_reshaped, x_reshaped, x_reshaped)
         
-        # Reshape back to [batch, channels, seq_len]
+        # Reshape back to [batch, embed_dim, seq_len]
         attn_out = attn_out.permute(1, 2, 0)
         
         # Apply residual connection and normalization
         out = x + attn_out
         
-        # Reshape for layer norm [batch, seq_len, channels]
+        # Reshape for layer norm [batch, seq_len, embed_dim]
         out = out.permute(0, 2, 1)
         out = self.norm(out)
         
-        # Reshape back to original format [batch, channels, seq_len]
+        # Reshape back to original format [batch, embed_dim, seq_len]
         out = out.permute(0, 2, 1)
         
         return out
@@ -401,11 +410,19 @@ class ImprovedCNNLSTMFusion(nn.Module):
         self.emg_encoder = ImprovedCNNEncoder(emg_channels, hidden_dim)
         self.eeg_encoder = ImprovedCNNEncoder(eeg_channels, hidden_dim)
         
-        # Cross-modal attention
+        # Cross-modal attention with correct embedding dimension
         self.cross_attention = MultiHeadAttention(hidden_dim * 8, ATTENTION_HEADS)
         
+        # Projection layer for combined features
+        self.feature_projection = nn.Sequential(
+            nn.Linear(hidden_dim * 16, hidden_dim * 8),
+            nn.LayerNorm(hidden_dim * 8),
+            nn.ELU(),
+            nn.Dropout(DROPOUT_RATE)
+        )
+        
         # LSTM with residual connections
-        lstm_input_dim = hidden_dim * 8 * 2
+        lstm_input_dim = hidden_dim * 8
         self.lstm = nn.LSTM(
             input_size=lstm_input_dim,
             hidden_size=hidden_dim * 4,
@@ -437,11 +454,16 @@ class ImprovedCNNLSTMFusion(nn.Module):
         # Concatenate along channel dimension
         combined = torch.cat((emg_features, eeg_features), dim=1)  # Shape: [batch, hidden_dim*16, seq_len]
         
+        # Project features to correct dimension for attention
+        combined = combined.permute(0, 2, 1)  # [batch, seq_len, hidden_dim*16]
+        combined = self.feature_projection(combined)  # [batch, seq_len, hidden_dim*8]
+        combined = combined.permute(0, 2, 1)  # [batch, hidden_dim*8, seq_len]
+        
         # Apply cross-modal attention
-        combined = self.cross_attention(combined)  # Shape: [batch, hidden_dim*16, seq_len]
+        combined = self.cross_attention(combined)  # Shape: [batch, hidden_dim*8, seq_len]
         
         # Prepare for LSTM
-        combined = combined.permute(0, 2, 1)  # Shape: [batch, seq_len, hidden_dim*16]
+        combined = combined.permute(0, 2, 1)  # Shape: [batch, seq_len, hidden_dim*8]
         
         # LSTM processing
         lstm_out, _ = self.lstm(combined)  # Shape: [batch, seq_len, hidden_dim*8]
