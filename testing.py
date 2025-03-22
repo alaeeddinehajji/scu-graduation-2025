@@ -61,7 +61,173 @@ VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42
 
 # %% [markdown]
-# ## Cell 3: Dataset Class Definition
+# ## Cell 3: Helper Functions
+# Define data loading and training functions
+
+# %%
+def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
+    print("Loading data...")
+    
+    # Load data
+    emg_data = pd.read_csv(emg_path)
+    eeg_data = pd.read_csv(eeg_path)
+    
+    # Extract features and labels
+    emg_features = emg_data.iloc[:, :8].values  # 8 EMG channels
+    eeg_features = eeg_data.iloc[:, :8].values  # 8 EEG channels
+    
+    # Standardize features
+    print("Normalizing data...")
+    emg_scaler = StandardScaler()
+    eeg_scaler = StandardScaler()
+    
+    emg_features = emg_scaler.fit_transform(emg_features)
+    eeg_features = eeg_scaler.fit_transform(eeg_features)
+    
+    # Create windowed data
+    emg_windows = []
+    eeg_windows = []
+    window_labels = []
+    sample_ids = []  # Track sample IDs for stratified splits
+    
+    # Find common samples between EMG and EEG data
+    emg_samples = set(tuple(x) for x in emg_data[['subject', 'repetition', 'gesture']].drop_duplicates().values)
+    eeg_samples = set(tuple(x) for x in eeg_data[['subject', 'repetition', 'gesture']].drop_duplicates().values)
+    common_samples = emg_samples.intersection(eeg_samples)
+    
+    print(f"Found {len(common_samples)} common samples between EMG and EEG data.")
+    
+    for sample in common_samples:
+        subject, repetition, gesture = sample
+        
+        # Get data for this sample
+        emg_sample = emg_data[(emg_data['subject'] == subject) & 
+                             (emg_data['repetition'] == repetition) & 
+                             (emg_data['gesture'] == gesture)]
+        
+        eeg_sample = eeg_data[(eeg_data['subject'] == subject) & 
+                             (eeg_data['repetition'] == repetition) & 
+                             (eeg_data['gesture'] == gesture)]
+        
+        # Make sure both samples have data
+        if len(emg_sample) == 0 or len(eeg_sample) == 0:
+            continue
+            
+        # Extract features
+        emg_sample_features = emg_sample.iloc[:, :8].values
+        eeg_sample_features = eeg_sample.iloc[:, :8].values
+        
+        # Standardize using pre-fitted scalers
+        emg_sample_features = emg_scaler.transform(emg_sample_features)
+        eeg_sample_features = eeg_scaler.transform(eeg_sample_features)
+        
+        # Handle different lengths by using the shorter one
+        min_length = min(len(emg_sample_features), len(eeg_sample_features))
+        if min_length <= window_size:
+            continue  # Skip if sample is too short
+            
+        emg_sample_features = emg_sample_features[:min_length]
+        eeg_sample_features = eeg_sample_features[:min_length]
+        
+        # Create windows with fixed size
+        for i in range(0, min_length - window_size, window_size // 2):
+            emg_window = emg_sample_features[i:i + window_size]
+            eeg_window = eeg_sample_features[i:i + window_size]
+            
+            # Only add if window is complete
+            if len(emg_window) == window_size and len(eeg_window) == window_size:
+                # Transpose the windows to have shape (channels, time_steps)
+                emg_windows.append(emg_window.T)  # Shape: (8, window_size)
+                eeg_windows.append(eeg_window.T)  # Shape: (8, window_size)
+                window_labels.append(gesture - 1)  # 0-indexed labels
+                sample_ids.append(f"{subject}_{repetition}_{gesture}")
+    
+    if len(emg_windows) == 0:
+        raise ValueError("No valid windows could be created. Check your data alignment.")
+    
+    print(f"Created {len(emg_windows)} windows from {len(common_samples)} samples.")
+    
+    # Convert to numpy arrays with explicit shape checking
+    emg_windows = np.array(emg_windows)  # Shape: (n_windows, n_channels, window_size)
+    eeg_windows = np.array(eeg_windows)  # Shape: (n_windows, n_channels, window_size)
+    window_labels = np.array(window_labels)
+    sample_ids = np.array(sample_ids)
+    
+    print(f"EMG windows shape: {emg_windows.shape}")
+    print(f"EEG windows shape: {eeg_windows.shape}")
+    
+    return emg_windows, eeg_windows, window_labels, sample_ids
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=NUM_EPOCHS):
+    print("Starting training...")
+    best_val_acc = 0.0
+    scaler = GradScaler()
+    
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        
+        for emg, eeg, labels in train_loader:
+            emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            
+            with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+                outputs = model(emg, eeg)
+                loss = criterion(outputs, labels)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_total += labels.size(0)
+            train_correct += predicted.eq(labels).sum().item()
+            
+        scheduler.step()
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for emg, eeg, labels in val_loader:
+                emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
+                outputs = model(emg, eeg)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item()
+                _, predicted = outputs.max(1)
+                val_total += labels.size(0)
+                val_correct += predicted.eq(labels).sum().item()
+                
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+        
+        train_acc = 100. * train_correct / train_total
+        val_acc = 100. * val_correct / val_total
+        val_f1 = f1_score(all_labels, all_preds, average='weighted')
+        
+        print(f'Epoch {epoch+1}/{num_epochs}:')
+        print(f'Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.2f}%')
+        print(f'Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%, Val F1: {val_f1:.4f}')
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
+        
+        print('-' * 60)
+
+# %% [markdown]
+# ## Cell 4: Dataset Class Definition
 # Implementation of the MultimodalDataset class for handling EMG and EEG data
 
 # %%
@@ -85,7 +251,7 @@ class MultimodalDataset(Dataset):
         return emg, eeg, self.labels[idx]
 
 # %% [markdown]
-# ## Cell 4: Model Architecture Components
+# ## Cell 5: Model Architecture Components
 # Define the CNN blocks and encoder components
 
 # %%
@@ -119,7 +285,7 @@ class CNNEncoder(nn.Module):
         return x
 
 # %% [markdown]
-# ## Cell 5: Main Model Architecture
+# ## Cell 6: Main Model Architecture
 # Implementation of the CNNLSTMFusion model combining EMG and EEG features
 
 # %%
@@ -185,7 +351,7 @@ class CNNLSTMFusion(nn.Module):
         return output
 
 # %% [markdown]
-# ## Cell 6: Data Loading and Preprocessing
+# ## Cell 7: Data Loading and Preprocessing
 # Load and preprocess the EMG and EEG data
 
 # %%
@@ -217,7 +383,7 @@ print(f"Validation: EMG {X_emg_val.shape}, EEG {X_eeg_val.shape}")
 print(f"Test: EMG {X_emg_test.shape}, EEG {X_eeg_test.shape}")
 
 # %% [markdown]
-# ## Cell 7: Create Data Loaders
+# ## Cell 8: Create Data Loaders
 # Prepare data loaders for training, validation, and testing
 
 # %%
@@ -234,7 +400,7 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, pin
 print("Data loaders created successfully")
 
 # %% [markdown]
-# ## Cell 8: Model Initialization
+# ## Cell 9: Model Initialization
 # Initialize the model, loss function, optimizer, and scheduler
 
 # %%
@@ -256,7 +422,7 @@ print("Model initialized successfully")
 print(f"Number of classes: {num_classes}")
 
 # %% [markdown]
-# ## Cell 9: Model Training
+# ## Cell 10: Model Training
 # Train the model using the prepared data loaders
 
 # %%
@@ -266,7 +432,7 @@ train_model(model, train_loader, val_loader, criterion, optimizer, scheduler)
 print("Training completed")
 
 # %% [markdown]
-# ## Cell 10: Model Evaluation
+# ## Cell 11: Model Evaluation
 # Evaluate the best model on the test set
 
 # %%
