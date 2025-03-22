@@ -247,7 +247,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             
             optimizer.zero_grad()
             
-            with autocast():
+            with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                 outputs = model(emg, eeg)
                 loss = criterion(outputs, labels)
             
