@@ -341,14 +341,32 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
         super(MultiHeadAttention, self).__init__()
         self.attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=DROPOUT_RATE)
-        self.norm = nn.LayerNorm(embed_dim)
+        self.norm = nn.LayerNorm([embed_dim])
         
     def forward(self, x):
-        # Reshape for attention [seq_len, batch, embed_dim]
-        x = x.permute(2, 0, 1)
-        attn_out, _ = self.attention(x, x, x)
-        attn_out = attn_out.permute(1, 2, 0)  # Back to [batch, embed_dim, seq_len]
-        return self.norm(x.permute(1, 2, 0) + attn_out)
+        # Input shape: [batch, channels, seq_len]
+        batch_size, channels, seq_len = x.size()
+        
+        # Reshape for attention [seq_len, batch, channels]
+        x_reshaped = x.permute(2, 0, 1)
+        
+        # Apply self-attention
+        attn_out, _ = self.attention(x_reshaped, x_reshaped, x_reshaped)
+        
+        # Reshape back to [batch, channels, seq_len]
+        attn_out = attn_out.permute(1, 2, 0)
+        
+        # Apply residual connection and normalization
+        out = x + attn_out
+        
+        # Reshape for layer norm [batch, seq_len, channels]
+        out = out.permute(0, 2, 1)
+        out = self.norm(out)
+        
+        # Reshape back to original format [batch, channels, seq_len]
+        out = out.permute(0, 2, 1)
+        
+        return out
 
 class ImprovedCNNEncoder(nn.Module):
     def __init__(self, input_channels, hidden_dim):
@@ -362,8 +380,11 @@ class ImprovedCNNEncoder(nn.Module):
         self.attention = MultiHeadAttention(hidden_dim * 8, ATTENTION_HEADS)
         
     def forward(self, x):
+        # Apply CNN blocks
         for block in self.blocks:
             x = block(x)
+        
+        # Apply attention
         x = self.attention(x)
         return x
 
@@ -394,7 +415,7 @@ class ImprovedCNNLSTMFusion(nn.Module):
             bidirectional=True
         )
         
-        # Improved classifier
+        # Improved classifier with proper dimensions
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 8, hidden_dim * 4),
             nn.LayerNorm(hidden_dim * 4),
@@ -408,30 +429,32 @@ class ImprovedCNNLSTMFusion(nn.Module):
         )
         
     def forward(self, emg, eeg):
-        # Extract features
-        emg_features = self.emg_encoder(emg)
-        eeg_features = self.eeg_encoder(eeg)
+        # Extract features with shape tracking
+        # Input shape: [batch, channels, seq_len]
+        emg_features = self.emg_encoder(emg)  # Shape: [batch, hidden_dim*8, seq_len]
+        eeg_features = self.eeg_encoder(eeg)  # Shape: [batch, hidden_dim*8, seq_len]
         
-        # Cross-modal attention
-        combined = torch.cat((emg_features, eeg_features), dim=1)
-        combined = self.cross_attention(combined)
+        # Concatenate along channel dimension
+        combined = torch.cat((emg_features, eeg_features), dim=1)  # Shape: [batch, hidden_dim*16, seq_len]
+        
+        # Apply cross-modal attention
+        combined = self.cross_attention(combined)  # Shape: [batch, hidden_dim*16, seq_len]
+        
+        # Prepare for LSTM
+        combined = combined.permute(0, 2, 1)  # Shape: [batch, seq_len, hidden_dim*16]
         
         # LSTM processing
-        batch_size = combined.size(0)
-        seq_len = combined.size(2)
-        combined = combined.permute(0, 2, 1)
+        lstm_out, _ = self.lstm(combined)  # Shape: [batch, seq_len, hidden_dim*8]
         
-        lstm_out, _ = self.lstm(combined)
-        
-        # Global average pooling and max pooling
-        avg_pool = torch.mean(lstm_out, dim=1)
-        max_pool, _ = torch.max(lstm_out, dim=1)
+        # Global pooling
+        avg_pool = torch.mean(lstm_out, dim=1)  # Shape: [batch, hidden_dim*8]
+        max_pool, _ = torch.max(lstm_out, dim=1)  # Shape: [batch, hidden_dim*8]
         
         # Combine pooling results
-        pooled = (avg_pool + max_pool) / 2
+        pooled = (avg_pool + max_pool) / 2  # Shape: [batch, hidden_dim*8]
         
         # Classification
-        output = self.classifier(pooled)
+        output = self.classifier(pooled)  # Shape: [batch, num_classes]
         
         return output
 
