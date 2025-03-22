@@ -68,6 +68,11 @@ CYCLE_LEN = NUM_EPOCHS // CYCLES  # Length of each cycle
 T_MULT = 2  # Factor to increase cycle length after each cycle
 ETA_MIN = MIN_LR  # Minimum learning rate for cosine annealing
 
+# Training improvements
+GRAD_CLIP_VAL = 1.0  # Gradient clipping value
+LABEL_SMOOTHING = 0.1  # Label smoothing factor
+NUM_CHECKPOINTS = 5  # Number of best checkpoints to save
+
 # %% [markdown]
 # ## Cell 3: Helper Functions
 # Define data loading and training functions
@@ -422,7 +427,7 @@ model = CNNLSTMFusion(
 ).to(device)
 
 # Define loss and optimizer
-criterion = nn.CrossEntropyLoss()
+criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = optim.AdamW(model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY)
 
 # Define learning rate scheduler
@@ -455,28 +460,39 @@ history = {
     'val_f1': []  # Added F1 score tracking
 }
 
+# Keep track of best checkpoints
+best_checkpoints = []
+
 for epoch in range(NUM_EPOCHS):
     model.train()
     train_loss = 0.0
     train_correct = 0
     train_total = 0
     
-    # Warmup learning rate for first few epochs
+    # Warmup learning rate for first few epochs with cosine schedule
     if epoch < WARMUP_EPOCHS:
+        progress = epoch / WARMUP_EPOCHS
+        warmup_factor = 0.5 * (1 + np.cos(np.pi * (1 - progress)))
+        current_lr = INITIAL_LR * warmup_factor
         for param_group in optimizer.param_groups:
-            param_group['lr'] = INITIAL_LR * (epoch + 1) / WARMUP_EPOCHS
+            param_group['lr'] = current_lr
     
     # Training phase
     for emg, eeg, labels in train_loader:
         emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
         
         with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
             outputs = model(emg, eeg)
             loss = criterion(outputs, labels)
         
         scaler.scale(loss).backward()
+        
+        # Gradient clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_VAL)
+        
         scaler.step(optimizer)
         scaler.update()
         
@@ -533,24 +549,39 @@ for epoch in range(NUM_EPOCHS):
     print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
     print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1: {val_f1:.4f}')
     
-    # Save best model
-    if val_acc > best_val_acc:
-        best_val_acc = val_acc
-        best_epoch = epoch
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'val_acc': val_acc,
-            'val_f1': val_f1,
-            'history': history
-        }, MODEL_SAVE_PATH)
-        print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
+    # Save checkpoint
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'val_acc': val_acc,
+        'val_f1': val_f1,
+        'history': history
+    }
+    
+    # Update best checkpoints list
+    best_checkpoints.append((val_acc, epoch, checkpoint))
+    best_checkpoints.sort(reverse=True)  # Sort by validation accuracy
+    best_checkpoints = best_checkpoints[:NUM_CHECKPOINTS]  # Keep top N checkpoints
+    
+    # Save if it's among the best checkpoints
+    if (val_acc, epoch) >= (best_checkpoints[-1][0], best_checkpoints[-1][1]):
+        torch.save(checkpoint, f"{MODEL_SAVE_PATH}.{len(best_checkpoints)}")
+        print(f'Saved checkpoint with validation accuracy: {val_acc:.2f}%')
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_epoch = epoch
+            torch.save(checkpoint, MODEL_SAVE_PATH)
+            print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
     
     print('-' * 60)
 
 print(f"Best model was saved at epoch {best_epoch+1} with validation accuracy: {best_val_acc:.2f}%")
+print("\nTop 5 best checkpoints:")
+for i, (acc, epoch, _) in enumerate(best_checkpoints, 1):
+    print(f"{i}. Epoch {epoch+1}: {acc:.2f}%")
 
 # Plot training history
 import matplotlib.pyplot as plt
