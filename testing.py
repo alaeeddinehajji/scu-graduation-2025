@@ -50,22 +50,28 @@ WINDOW_SIZE = 200  # Window size for data processing
 
 # Model hyperparameters
 BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-NUM_EPOCHS = 100
-HIDDEN_DIM = 64
+INITIAL_LR = 0.001  # Initial learning rate
+MIN_LR = 1e-6      # Minimum learning rate
 WEIGHT_DECAY = 1e-5
+HIDDEN_DIM = 64
 
 # Training settings
 TRAIN_TEST_SPLIT = 0.2
 VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42
 
-# New hyperparameters
+# Learning rate scheduler settings
+NUM_EPOCHS = 100
 WARMUP_EPOCHS = 5
-DROPOUT_RATE = 0.3
-ATTENTION_HEADS = 4
-AUGMENTATION_PROB = 0.5
-LABEL_SMOOTHING = 0.1
+CYCLES = 3  # Number of cosine annealing cycles
+CYCLE_LEN = NUM_EPOCHS // CYCLES  # Length of each cycle
+T_MULT = 2  # Factor to increase cycle length after each cycle
+ETA_MIN = MIN_LR  # Minimum learning rate for cosine annealing
+
+# Early stopping settings
+EARLY_STOP_PATIENCE = 10
+LR_PATIENCE = 3
+LR_FACTOR = 0.5
 
 # %% [markdown]
 # ## Cell 3: Helper Functions
@@ -165,43 +171,16 @@ def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
     
     return emg_windows, eeg_windows, window_labels, sample_ids
 
-def augment_signal(signal, prob=AUGMENTATION_PROB):
-    """Apply various augmentations to the signal."""
-    if random.random() < prob:
-        # Random scaling
-        scale = random.uniform(0.8, 1.2)
-        signal = signal * scale
-    
-    if random.random() < prob:
-        # Add Gaussian noise
-        noise = torch.randn_like(signal) * 0.05
-        signal = signal + noise
-    
-    if random.random() < prob:
-        # Random time shift
-        shift = random.randint(-10, 10)
-        signal = torch.roll(signal, shifts=shift, dims=-1)
-    
-    return signal
-
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs=NUM_EPOCHS):
     print("Starting training...")
     best_val_acc = 0.0
     scaler = GradScaler()
-    
-    # Learning rate warmup
-    warmup_factor = LEARNING_RATE / WARMUP_EPOCHS
     
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
-        
-        # Warmup learning rate
-        if epoch < WARMUP_EPOCHS:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = warmup_factor * (epoch + 1)
         
         for emg, eeg, labels in train_loader:
             emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
@@ -210,16 +189,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             
             with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                 outputs = model(emg, eeg)
-                # Label smoothing
-                loss = criterion(outputs, labels) * (1 - LABEL_SMOOTHING) + \
-                       LABEL_SMOOTHING * torch.mean(outputs) / num_classes
+                loss = criterion(outputs, labels)
             
             scaler.scale(loss).backward()
-            
-            # Gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             scaler.step(optimizer)
             scaler.update()
             
@@ -227,9 +199,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             _, predicted = outputs.max(1)
             train_total += labels.size(0)
             train_correct += predicted.eq(labels).sum().item()
-        
-        if epoch >= WARMUP_EPOCHS:
-            scheduler.step()
+            
+        scheduler.step()
         
         # Validation
         model.eval()
@@ -274,27 +245,22 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
 # %%
 class MultimodalDataset(Dataset):
-    def __init__(self, emg_data, eeg_data, labels, time_shift=DELTA_T, augment=False):
+    def __init__(self, emg_data, eeg_data, labels, time_shift=DELTA_T):
+        # Data is already in shape (n_windows, n_channels, window_size)
         self.emg_data = torch.FloatTensor(emg_data)
         self.eeg_data = torch.FloatTensor(eeg_data)
         self.labels = torch.LongTensor(labels)
         self.time_shift = time_shift
-        self.augment = augment
         
     def __len__(self):
         return len(self.labels)
     
     def __getitem__(self, idx):
-        emg = self.emg_data[idx]
-        eeg = self.eeg_data[idx]
-        
-        if self.augment:
-            emg = augment_signal(emg)
-            eeg = augment_signal(eeg)
-        
+        # Shift EMG data by DELTA_T
+        emg = self.emg_data[idx]  # Shape: (n_channels, window_size)
+        eeg = self.eeg_data[idx]  # Shape: (n_channels, window_size)
         if self.time_shift > 0:
             emg = F.pad(emg[:, self.time_shift:], (0, self.time_shift))
-        
         return emg, eeg, self.labels[idx]
 
 # %% [markdown]
@@ -302,99 +268,33 @@ class MultimodalDataset(Dataset):
 # Define the CNN blocks and encoder components
 
 # %%
-class ResidualCNNBlock(nn.Module):
+class CNNBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(ResidualCNNBlock, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        
-        # Residual connection
-        self.downsample = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size=1),
-            nn.BatchNorm1d(out_channels)
-        ) if in_channels != out_channels else nn.Identity()
-        
-        self.relu = nn.ELU()
-        self.pool = nn.AvgPool1d(2)
-        self.dropout = nn.Dropout(DROPOUT_RATE)
+        super(CNNBlock, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
+            nn.ELU(),
+            nn.AvgPool1d(2)
+        )
         
     def forward(self, x):
-        identity = self.downsample(x)
-        
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.dropout(out)
-        
-        out = self.conv2(out)
-        out = self.bn2(out)
-        
-        out += identity
-        out = self.relu(out)
-        out = self.pool(out)
-        
-        return out
+        return self.conv(x)
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
-        super(MultiHeadAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=DROPOUT_RATE)
-        self.norm = nn.LayerNorm([embed_dim])
-        
-    def forward(self, x):
-        # Input shape: [batch, channels, seq_len]
-        batch_size, channels, seq_len = x.size()
-        
-        # Check if we need to project the channels dimension
-        if channels != self.embed_dim:
-            # Add a projection layer
-            projection = nn.Linear(channels, self.embed_dim).to(x.device)
-            x = x.permute(0, 2, 1)  # [batch, seq_len, channels]
-            x = projection(x)
-            x = x.permute(0, 2, 1)  # [batch, embed_dim, seq_len]
-        
-        # Reshape for attention [seq_len, batch, embed_dim]
-        x_reshaped = x.permute(2, 0, 1)
-        
-        # Apply self-attention
-        attn_out, _ = self.attention(x_reshaped, x_reshaped, x_reshaped)
-        
-        # Reshape back to [batch, embed_dim, seq_len]
-        attn_out = attn_out.permute(1, 2, 0)
-        
-        # Apply residual connection and normalization
-        out = x + attn_out
-        
-        # Reshape for layer norm [batch, seq_len, embed_dim]
-        out = out.permute(0, 2, 1)
-        out = self.norm(out)
-        
-        # Reshape back to original format [batch, embed_dim, seq_len]
-        out = out.permute(0, 2, 1)
-        
-        return out
-
-class ImprovedCNNEncoder(nn.Module):
+class CNNEncoder(nn.Module):
     def __init__(self, input_channels, hidden_dim):
-        super(ImprovedCNNEncoder, self).__init__()
-        self.blocks = nn.ModuleList([
-            ResidualCNNBlock(input_channels, hidden_dim),
-            ResidualCNNBlock(hidden_dim, hidden_dim * 2),
-            ResidualCNNBlock(hidden_dim * 2, hidden_dim * 4),
-            ResidualCNNBlock(hidden_dim * 4, hidden_dim * 8)
+        super(CNNEncoder, self).__init__()
+        self.cnn_blocks = nn.ModuleList([
+            CNNBlock(input_channels, hidden_dim),
+            CNNBlock(hidden_dim, hidden_dim * 2),
+            CNNBlock(hidden_dim * 2, hidden_dim * 4),
+            CNNBlock(hidden_dim * 4, hidden_dim * 8)
         ])
-        self.attention = MultiHeadAttention(hidden_dim * 8, ATTENTION_HEADS)
         
     def forward(self, x):
-        # Apply CNN blocks
-        for block in self.blocks:
+        # Input shape: [batch, channels, sequence]
+        for block in self.cnn_blocks:
             x = block(x)
-        
-        # Apply attention
-        x = self.attention(x)
         return x
 
 # %% [markdown]
@@ -402,81 +302,64 @@ class ImprovedCNNEncoder(nn.Module):
 # Implementation of the CNNLSTMFusion model combining EMG and EEG features
 
 # %%
-class ImprovedCNNLSTMFusion(nn.Module):
+class CNNLSTMFusion(nn.Module):
     def __init__(self, emg_channels, eeg_channels, hidden_dim, num_classes):
-        super(ImprovedCNNLSTMFusion, self).__init__()
+        super(CNNLSTMFusion, self).__init__()
         
-        # Improved encoders
-        self.emg_encoder = ImprovedCNNEncoder(emg_channels, hidden_dim)
-        self.eeg_encoder = ImprovedCNNEncoder(eeg_channels, hidden_dim)
+        # CNN Encoders
+        self.emg_encoder = CNNEncoder(emg_channels, hidden_dim)
+        self.eeg_encoder = CNNEncoder(eeg_channels, hidden_dim)
         
-        # Cross-modal attention with correct embedding dimension
-        self.cross_attention = MultiHeadAttention(hidden_dim * 8, ATTENTION_HEADS)
-        
-        # Projection layer for combined features
-        self.feature_projection = nn.Sequential(
-            nn.Linear(hidden_dim * 16, hidden_dim * 8),
-            nn.LayerNorm(hidden_dim * 8),
-            nn.ELU(),
-            nn.Dropout(DROPOUT_RATE)
-        )
-        
-        # LSTM with residual connections
-        lstm_input_dim = hidden_dim * 8
+        # LSTM layers
+        lstm_input_dim = hidden_dim * 8 * 2  # Combined features from both modalities
         self.lstm = nn.LSTM(
             input_size=lstm_input_dim,
             hidden_size=hidden_dim * 4,
             num_layers=2,
             batch_first=True,
-            dropout=DROPOUT_RATE,
+            dropout=0.3,
             bidirectional=True
         )
         
-        # Improved classifier with proper dimensions
+        # Dropout for regularization
+        self.dropout = nn.Dropout(0.5)
+        
+        # Final classification layers
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 8, hidden_dim * 4),
             nn.LayerNorm(hidden_dim * 4),
             nn.ELU(),
-            nn.Dropout(DROPOUT_RATE),
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim * 4, hidden_dim * 2),
             nn.LayerNorm(hidden_dim * 2),
             nn.ELU(),
-            nn.Dropout(DROPOUT_RATE * 0.8),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim * 2, num_classes)
         )
         
     def forward(self, emg, eeg):
-        # Extract features with shape tracking
-        # Input shape: [batch, channels, seq_len]
-        emg_features = self.emg_encoder(emg)  # Shape: [batch, hidden_dim*8, seq_len]
-        eeg_features = self.eeg_encoder(eeg)  # Shape: [batch, hidden_dim*8, seq_len]
+        # Input shapes are already [batch, channels, sequence]
         
-        # Concatenate along channel dimension
-        combined = torch.cat((emg_features, eeg_features), dim=1)  # Shape: [batch, hidden_dim*16, seq_len]
+        # CNN feature extraction
+        emg_features = self.emg_encoder(emg)
+        eeg_features = self.eeg_encoder(eeg)
         
-        # Project features to correct dimension for attention
-        combined = combined.permute(0, 2, 1)  # [batch, seq_len, hidden_dim*16]
-        combined = self.feature_projection(combined)  # [batch, seq_len, hidden_dim*8]
-        combined = combined.permute(0, 2, 1)  # [batch, hidden_dim*8, seq_len]
+        # Combine features
+        combined = torch.cat((emg_features, eeg_features), dim=1)
         
-        # Apply cross-modal attention
-        combined = self.cross_attention(combined)  # Shape: [batch, hidden_dim*8, seq_len]
-        
-        # Prepare for LSTM
-        combined = combined.permute(0, 2, 1)  # Shape: [batch, seq_len, hidden_dim*8]
+        # Reshape for LSTM
+        batch_size = combined.size(0)
+        seq_len = combined.size(2)
+        combined = combined.permute(0, 2, 1)  # [batch, seq_len, features]
         
         # LSTM processing
-        lstm_out, _ = self.lstm(combined)  # Shape: [batch, seq_len, hidden_dim*8]
+        lstm_out, _ = self.lstm(combined)
         
-        # Global pooling
-        avg_pool = torch.mean(lstm_out, dim=1)  # Shape: [batch, hidden_dim*8]
-        max_pool, _ = torch.max(lstm_out, dim=1)  # Shape: [batch, hidden_dim*8]
-        
-        # Combine pooling results
-        pooled = (avg_pool + max_pool) / 2  # Shape: [batch, hidden_dim*8]
+        # Take the last output
+        lstm_out = lstm_out[:, -1, :]
         
         # Classification
-        output = self.classifier(pooled)  # Shape: [batch, num_classes]
+        output = self.classifier(lstm_out)
         
         return output
 
@@ -518,9 +401,9 @@ print(f"Test: EMG {X_emg_test.shape}, EEG {X_eeg_test.shape}")
 
 # %%
 # Create datasets
-train_dataset = MultimodalDataset(X_emg_train, X_eeg_train, y_train, augment=True)
-val_dataset = MultimodalDataset(X_emg_val, X_eeg_val, y_val, augment=False)
-test_dataset = MultimodalDataset(X_emg_test, X_eeg_test, y_test, augment=False)
+train_dataset = MultimodalDataset(X_emg_train, X_eeg_train, y_train)
+val_dataset = MultimodalDataset(X_emg_val, X_eeg_val, y_val)
+test_dataset = MultimodalDataset(X_emg_test, X_eeg_test, y_test)
 
 # Create dataloaders
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
@@ -531,12 +414,12 @@ print("Data loaders created successfully")
 
 # %% [markdown]
 # ## Cell 9: Model Initialization
-# Initialize the model, loss function, optimizer, and scheduler
+# Initialize the model, loss function, and optimizer with advanced learning rate scheduling
 
 # %%
 # Initialize model
 num_classes = len(np.unique(labels))
-model = ImprovedCNNLSTMFusion(
+model = CNNLSTMFusion(
     emg_channels=8,
     eeg_channels=8,
     hidden_dim=HIDDEN_DIM,
@@ -545,20 +428,168 @@ model = ImprovedCNNLSTMFusion(
 
 # Define loss and optimizer
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=LEARNING_RATE/100)
+optimizer = optim.AdamW(model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY)
+
+# Define learning rate scheduler
+scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer,
+    T_0=CYCLE_LEN,  # First cycle length
+    T_mult=T_MULT,  # Cycle length multiplication factor
+    eta_min=MIN_LR  # Minimum learning rate
+)
 
 print("Model initialized successfully")
 print(f"Number of classes: {num_classes}")
 
 # %% [markdown]
 # ## Cell 10: Model Training
-# Train the model using the prepared data loaders
+# Train the model using advanced learning rate scheduling
 
 # %%
 # Train model
 print("Starting training...")
-train_model(model, train_loader, val_loader, criterion, optimizer, scheduler)
+best_val_acc = 0.0
+best_epoch = 0
+scaler = GradScaler()
+patience_counter = 0
+
+# Training history
+history = {
+    'train_loss': [], 'train_acc': [],
+    'val_loss': [], 'val_acc': [],
+    'lr': []
+}
+
+for epoch in range(NUM_EPOCHS):
+    model.train()
+    train_loss = 0.0
+    train_correct = 0
+    train_total = 0
+    
+    # Warmup learning rate for first few epochs
+    if epoch < WARMUP_EPOCHS:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = INITIAL_LR * (epoch + 1) / WARMUP_EPOCHS
+    
+    # Training phase
+    for emg, eeg, labels in train_loader:
+        emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
+        
+        optimizer.zero_grad()
+        
+        with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+            outputs = model(emg, eeg)
+            loss = criterion(outputs, labels)
+        
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        train_loss += loss.item()
+        _, predicted = outputs.max(1)
+        train_total += labels.size(0)
+        train_correct += predicted.eq(labels).sum().item()
+    
+    # Validation phase
+    model.eval()
+    val_loss = 0.0
+    val_correct = 0
+    val_total = 0
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for emg, eeg, labels in val_loader:
+            emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
+            outputs = model(emg, eeg)
+            loss = criterion(outputs, labels)
+            
+            val_loss += loss.item()
+            _, predicted = outputs.max(1)
+            val_total += labels.size(0)
+            val_correct += predicted.eq(labels).sum().item()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    # Calculate metrics
+    train_loss = train_loss / len(train_loader)
+    val_loss = val_loss / len(val_loader)
+    train_acc = 100. * train_correct / train_total
+    val_acc = 100. * val_correct / val_total
+    val_f1 = f1_score(all_labels, all_preds, average='weighted')
+    current_lr = optimizer.param_groups[0]['lr']
+    
+    # Update learning rate scheduler after warmup
+    if epoch >= WARMUP_EPOCHS:
+        scheduler.step()
+    
+    # Update history
+    history['train_loss'].append(train_loss)
+    history['train_acc'].append(train_acc)
+    history['val_loss'].append(val_loss)
+    history['val_acc'].append(val_acc)
+    history['lr'].append(current_lr)
+    
+    # Print progress
+    print(f'Epoch {epoch+1}/{NUM_EPOCHS}:')
+    print(f'LR: {current_lr:.6f}')
+    print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
+    print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1: {val_f1:.4f}')
+    
+    # Save best model
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        best_epoch = epoch
+        torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
+        patience_counter = 0
+    else:
+        patience_counter += 1
+    
+    # Early stopping check
+    if patience_counter >= EARLY_STOP_PATIENCE:
+        print(f'Early stopping triggered after {epoch+1} epochs')
+        break
+    
+    print('-' * 60)
+
+print(f"Best model was saved at epoch {best_epoch+1} with validation accuracy: {best_val_acc:.2f}%")
+
+# Plot training history
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(15, 5))
+
+# Plot losses
+plt.subplot(1, 3, 1)
+plt.plot(history['train_loss'], label='Train Loss')
+plt.plot(history['val_loss'], label='Val Loss')
+plt.title('Loss History')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+# Plot accuracies
+plt.subplot(1, 3, 2)
+plt.plot(history['train_acc'], label='Train Acc')
+plt.plot(history['val_acc'], label='Val Acc')
+plt.title('Accuracy History')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy (%)')
+plt.legend()
+
+# Plot learning rate
+plt.subplot(1, 3, 3)
+plt.plot(history['lr'])
+plt.title('Learning Rate Schedule')
+plt.xlabel('Epoch')
+plt.ylabel('Learning Rate')
+plt.yscale('log')
+
+plt.tight_layout()
+plt.show()
+
 print("Training completed")
 
 # %% [markdown]
