@@ -35,7 +35,7 @@ HIDDEN_DIM = 64
 
 class MultimodalDataset(Dataset):
     def __init__(self, emg_data, eeg_data, labels, time_shift=DELTA_T):
-        # Apply time shift to EMG data
+        # Data is already in shape (n_windows, n_channels, window_size)
         self.emg_data = torch.FloatTensor(emg_data)
         self.eeg_data = torch.FloatTensor(eeg_data)
         self.labels = torch.LongTensor(labels)
@@ -46,8 +46,8 @@ class MultimodalDataset(Dataset):
     
     def __getitem__(self, idx):
         # Shift EMG data by DELTA_T
-        emg = self.emg_data[idx]
-        eeg = self.eeg_data[idx]
+        emg = self.emg_data[idx]  # Shape: (n_channels, window_size)
+        eeg = self.eeg_data[idx]  # Shape: (n_channels, window_size)
         if self.time_shift > 0:
             emg = F.pad(emg[:, self.time_shift:], (0, self.time_shift))
         return emg, eeg, self.labels[idx]
@@ -117,35 +117,40 @@ class CNNLSTMFusion(nn.Module):
         )
         
     def forward(self, emg, eeg):
-        # Input shapes: [batch, sequence, channels]
-        # Need to permute to: [batch, channels, sequence]
-        emg = emg.transpose(1, 2)  # [batch, channels, sequence]
-        eeg = eeg.transpose(1, 2)  # [batch, channels, sequence]
-        
-        # Print shapes for debugging
-        # print(f"EMG shape after transpose: {emg.shape}")
-        # print(f"EEG shape after transpose: {eeg.shape}")
+        # Input shapes are already [batch, channels, sequence]
+        # Debug prints for input shapes
+        print(f"Initial EMG shape: {emg.shape}")
+        print(f"Initial EEG shape: {eeg.shape}")
         
         # CNN feature extraction
         emg_features = self.emg_encoder(emg)
         eeg_features = self.eeg_encoder(eeg)
         
+        # Debug prints after CNN
+        print(f"EMG features shape: {emg_features.shape}")
+        print(f"EEG features shape: {eeg_features.shape}")
+        
         # Combine features
         combined = torch.cat((emg_features, eeg_features), dim=1)
+        print(f"Combined shape before LSTM: {combined.shape}")
         
         # Reshape for LSTM
         batch_size = combined.size(0)
         seq_len = combined.size(2)
-        combined = combined.transpose(1, 2)  # [batch, seq_len, features]
+        combined = combined.permute(0, 2, 1)  # [batch, seq_len, features]
+        print(f"Combined shape after permute for LSTM: {combined.shape}")
         
         # LSTM processing
         lstm_out, _ = self.lstm(combined)
+        print(f"LSTM output shape: {lstm_out.shape}")
         
         # Take the last output
         lstm_out = lstm_out[:, -1, :]
+        print(f"Last LSTM output shape: {lstm_out.shape}")
         
         # Classification
         output = self.classifier(lstm_out)
+        print(f"Final output shape: {output.shape}")
         
         return output
 
@@ -220,8 +225,9 @@ def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
             
             # Only add if window is complete
             if len(emg_window) == window_size and len(eeg_window) == window_size:
-                emg_windows.append(emg_window)
-                eeg_windows.append(eeg_window)
+                # Transpose the windows to have shape (channels, time_steps)
+                emg_windows.append(emg_window.T)  # Shape: (8, window_size)
+                eeg_windows.append(eeg_window.T)  # Shape: (8, window_size)
                 window_labels.append(gesture - 1)  # 0-indexed labels
                 sample_ids.append(f"{subject}_{repetition}_{gesture}")
     
@@ -231,8 +237,8 @@ def load_and_preprocess_data(emg_path, eeg_path, window_size=WINDOW_SIZE):
     print(f"Created {len(emg_windows)} windows from {len(common_samples)} samples.")
     
     # Convert to numpy arrays with explicit shape checking
-    emg_windows = np.array(emg_windows)  # Shape: (n_windows, window_size, n_channels)
-    eeg_windows = np.array(eeg_windows)  # Shape: (n_windows, window_size, n_channels)
+    emg_windows = np.array(emg_windows)  # Shape: (n_windows, n_channels, window_size)
+    eeg_windows = np.array(eeg_windows)  # Shape: (n_windows, n_channels, window_size)
     window_labels = np.array(window_labels)
     sample_ids = np.array(sample_ids)
     
