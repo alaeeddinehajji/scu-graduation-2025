@@ -272,84 +272,30 @@ class CNNBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(CNNBlock, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size=5, padding=2),
+            nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm1d(out_channels),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Dropout(0.2),
-            
-            nn.Conv1d(out_channels, out_channels*2, kernel_size=3, padding=1),
-            nn.BatchNorm1d(out_channels*2),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Dropout(0.2)
+            nn.ELU(),
+            nn.AvgPool1d(2)
         )
         
     def forward(self, x):
         return self.conv(x)
 
-class LateFusionCNN(nn.Module):
-    def __init__(self, emg_channels, eeg_channels, hidden_dim, num_classes):
-        super(LateFusionCNN, self).__init__()
+class CNNEncoder(nn.Module):
+    def __init__(self, input_channels, hidden_dim):
+        super(CNNEncoder, self).__init__()
+        self.cnn_blocks = nn.ModuleList([
+            CNNBlock(input_channels, hidden_dim),
+            CNNBlock(hidden_dim, hidden_dim * 2),
+            CNNBlock(hidden_dim * 2, hidden_dim * 4),
+            CNNBlock(hidden_dim * 4, hidden_dim * 8)
+        ])
         
-        # EMG CNN Branch
-        self.emg_cnn = nn.Sequential(
-            CNNBlock(emg_channels, hidden_dim),
-            nn.Conv1d(hidden_dim*2, hidden_dim*4, kernel_size=3, padding=1),
-            nn.BatchNorm1d(hidden_dim*4),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten()
-        )
-        
-        # EEG CNN Branch
-        self.eeg_cnn = nn.Sequential(
-            CNNBlock(eeg_channels, hidden_dim),
-            nn.Conv1d(hidden_dim*2, hidden_dim*4, kernel_size=3, padding=1),
-            nn.BatchNorm1d(hidden_dim*4),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten()
-        )
-        
-        # Late Fusion and Classification
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim*8, hidden_dim*4),
-            nn.LayerNorm(hidden_dim*4),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(hidden_dim*4, hidden_dim*2),
-            nn.LayerNorm(hidden_dim*2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim*2, num_classes)
-        )
-        
-        # Initialize weights
-        self.apply(self._init_weights)
-        
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv1d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-        elif isinstance(m, nn.BatchNorm1d):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            nn.init.xavier_normal_(m.weight)
-            nn.init.constant_(m.bias, 0)
-        
-    def forward(self, emg, eeg):
-        # Extract features from each modality
-        emg_features = self.emg_cnn(emg)  # Shape: [batch, hidden_dim*4]
-        eeg_features = self.eeg_cnn(eeg)  # Shape: [batch, hidden_dim*4]
-        
-        # Concatenate features
-        combined = torch.cat((emg_features, eeg_features), dim=1)  # Shape: [batch, hidden_dim*8]
-        
-        # Classification
-        output = self.classifier(combined)
-        
-        return output
+    def forward(self, x):
+        # Input shape: [batch, channels, sequence]
+        for block in self.cnn_blocks:
+            x = block(x)
+        return x
 
 # %% [markdown]
 # ## Cell 6: Main Model Architecture
@@ -473,18 +419,18 @@ print("Data loaders created successfully")
 # %%
 # Initialize model
 num_classes = len(np.unique(labels))
-model = LateFusionCNN(
+model = CNNLSTMFusion(
     emg_channels=8,
     eeg_channels=8,
     hidden_dim=HIDDEN_DIM,
     num_classes=num_classes
 ).to(device)
 
-# Define loss and optimizer with improved settings
+# Define loss and optimizer
 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = optim.AdamW(model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY)
 
-# Define learning rate scheduler with cosine annealing and warm restarts
+# Define learning rate scheduler
 scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer,
     T_0=CYCLE_LEN,  # First cycle length
@@ -494,8 +440,6 @@ scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
 
 print("Model initialized successfully")
 print(f"Number of classes: {num_classes}")
-print("\nModel Architecture:")
-print(model)
 
 # %% [markdown]
 # ## Cell 10: Model Training
