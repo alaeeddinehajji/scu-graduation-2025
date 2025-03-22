@@ -595,7 +595,7 @@ def main():
     window_size = 50
     batch_size = 32  # Adjusted batch size for mixed precision
     learning_rate = 0.001
-    num_epochs = 3
+    num_epochs = 100
     hidden_dim = 64
     
     # Set paths to your data files
