@@ -118,39 +118,27 @@ class CNNLSTMFusion(nn.Module):
         
     def forward(self, emg, eeg):
         # Input shapes are already [batch, channels, sequence]
-        # Debug prints for input shapes
-        print(f"Initial EMG shape: {emg.shape}")
-        print(f"Initial EEG shape: {eeg.shape}")
         
         # CNN feature extraction
         emg_features = self.emg_encoder(emg)
         eeg_features = self.eeg_encoder(eeg)
         
-        # Debug prints after CNN
-        print(f"EMG features shape: {emg_features.shape}")
-        print(f"EEG features shape: {eeg_features.shape}")
-        
         # Combine features
         combined = torch.cat((emg_features, eeg_features), dim=1)
-        print(f"Combined shape before LSTM: {combined.shape}")
         
         # Reshape for LSTM
         batch_size = combined.size(0)
         seq_len = combined.size(2)
         combined = combined.permute(0, 2, 1)  # [batch, seq_len, features]
-        print(f"Combined shape after permute for LSTM: {combined.shape}")
         
         # LSTM processing
         lstm_out, _ = self.lstm(combined)
-        print(f"LSTM output shape: {lstm_out.shape}")
         
         # Take the last output
         lstm_out = lstm_out[:, -1, :]
-        print(f"Last LSTM output shape: {lstm_out.shape}")
         
         # Classification
         output = self.classifier(lstm_out)
-        print(f"Final output shape: {output.shape}")
         
         return output
 
