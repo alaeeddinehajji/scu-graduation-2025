@@ -60,13 +60,8 @@ TRAIN_TEST_SPLIT = 0.2
 VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42
 
-# Advanced training settings
-GRAD_CLIP = 1.0    # Gradient clipping threshold
-LABEL_SMOOTHING = 0.1  # Label smoothing factor
-SCHEDULER_GAMMA = 0.95  # Learning rate decay factor
-
 # Learning rate scheduler settings
-NUM_EPOCHS = 300  # Will run for full 100 epochs
+NUM_EPOCHS = 100  # Will run for full 100 epochs
 WARMUP_EPOCHS = 5
 CYCLES = 3  # Number of cosine annealing cycles
 CYCLE_LEN = NUM_EPOCHS // CYCLES  # Length of each cycle
@@ -426,23 +421,16 @@ model = CNNLSTMFusion(
     num_classes=num_classes
 ).to(device)
 
-# Define loss with label smoothing
-criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+# Define loss and optimizer
+criterion = nn.CrossEntropyLoss()
 optimizer = optim.AdamW(model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY)
 
-# Define learning rate schedulers
-warmup_scheduler = optim.lr_scheduler.LinearLR(
-    optimizer, 
-    start_factor=0.1,
-    end_factor=1.0,
-    total_iters=WARMUP_EPOCHS
-)
-
-main_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+# Define learning rate scheduler
+scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer,
-    T_0=CYCLE_LEN,
-    T_mult=T_MULT,
-    eta_min=MIN_LR
+    T_0=CYCLE_LEN,  # First cycle length
+    T_mult=T_MULT,  # Cycle length multiplication factor
+    eta_min=MIN_LR  # Minimum learning rate
 )
 
 print("Model initialized successfully")
@@ -456,15 +444,15 @@ print(f"Number of classes: {num_classes}")
 # Train model
 print("Starting training...")
 best_val_acc = 0.0
-best_val_f1 = 0.0
 best_epoch = 0
 scaler = GradScaler()
 
 # Training history
 history = {
-    'train_loss': [], 'train_acc': [], 'train_f1': [],
-    'val_loss': [], 'val_acc': [], 'val_f1': [],
-    'lr': [], 'grad_norm': []
+    'train_loss': [], 'train_acc': [],
+    'val_loss': [], 'val_acc': [],
+    'lr': [],
+    'val_f1': []  # Added F1 score tracking
 }
 
 for epoch in range(NUM_EPOCHS):
@@ -472,12 +460,14 @@ for epoch in range(NUM_EPOCHS):
     train_loss = 0.0
     train_correct = 0
     train_total = 0
-    train_preds = []
-    train_labels_list = []
-    epoch_grad_norm = 0.0
+    
+    # Warmup learning rate for first few epochs
+    if epoch < WARMUP_EPOCHS:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = INITIAL_LR * (epoch + 1) / WARMUP_EPOCHS
     
     # Training phase
-    for batch_idx, (emg, eeg, labels) in enumerate(train_loader):
+    for emg, eeg, labels in train_loader:
         emg, eeg, labels = emg.to(device), eeg.to(device), labels.to(device)
         
         optimizer.zero_grad()
@@ -487,12 +477,6 @@ for epoch in range(NUM_EPOCHS):
             loss = criterion(outputs, labels)
         
         scaler.scale(loss).backward()
-        
-        # Gradient clipping
-        scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-        epoch_grad_norm += grad_norm.item()
-        
         scaler.step(optimizer)
         scaler.update()
         
@@ -500,28 +484,14 @@ for epoch in range(NUM_EPOCHS):
         _, predicted = outputs.max(1)
         train_total += labels.size(0)
         train_correct += predicted.eq(labels).sum().item()
-        
-        train_preds.extend(predicted.cpu().numpy())
-        train_labels_list.extend(labels.cpu().numpy())
-        
-        # Print batch progress
-        if (batch_idx + 1) % 10 == 0:
-            print(f'Batch [{batch_idx + 1}/{len(train_loader)}] - '
-                  f'Loss: {loss.item():.4f}')
-    
-    # Update learning rate schedulers
-    if epoch < WARMUP_EPOCHS:
-        warmup_scheduler.step()
-    else:
-        main_scheduler.step()
     
     # Validation phase
     model.eval()
     val_loss = 0.0
     val_correct = 0
     val_total = 0
-    val_preds = []
-    val_labels_list = []
+    all_preds = []
+    all_labels = []
     
     with torch.no_grad():
         for emg, eeg, labels in val_loader:
@@ -534,74 +504,61 @@ for epoch in range(NUM_EPOCHS):
             val_total += labels.size(0)
             val_correct += predicted.eq(labels).sum().item()
             
-            val_preds.extend(predicted.cpu().numpy())
-            val_labels_list.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
     # Calculate metrics
     train_loss = train_loss / len(train_loader)
     val_loss = val_loss / len(val_loader)
     train_acc = 100. * train_correct / train_total
     val_acc = 100. * val_correct / val_total
-    train_f1 = f1_score(train_labels_list, train_preds, average='weighted')
-    val_f1 = f1_score(val_labels_list, val_preds, average='weighted')
+    val_f1 = f1_score(all_labels, all_preds, average='weighted')
     current_lr = optimizer.param_groups[0]['lr']
-    avg_grad_norm = epoch_grad_norm / len(train_loader)
+    
+    # Update learning rate scheduler after warmup
+    if epoch >= WARMUP_EPOCHS:
+        scheduler.step()
     
     # Update history
     history['train_loss'].append(train_loss)
     history['train_acc'].append(train_acc)
-    history['train_f1'].append(train_f1)
     history['val_loss'].append(val_loss)
     history['val_acc'].append(val_acc)
-    history['val_f1'].append(val_f1)
     history['lr'].append(current_lr)
-    history['grad_norm'].append(avg_grad_norm)
+    history['val_f1'].append(val_f1)
     
     # Print progress
-    print(f'\nEpoch {epoch+1}/{NUM_EPOCHS}:')
+    print(f'Epoch {epoch+1}/{NUM_EPOCHS}:')
     print(f'LR: {current_lr:.6f}')
-    print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Train F1: {train_f1:.4f}')
+    print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
     print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1: {val_f1:.4f}')
-    print(f'Gradient Norm: {avg_grad_norm:.4f}')
     
-    # Save best model based on both accuracy and F1 score
-    if val_acc > best_val_acc or (val_acc == best_val_acc and val_f1 > best_val_f1):
+    # Save best model
+    if val_acc > best_val_acc:
         best_val_acc = val_acc
-        best_val_f1 = val_f1
         best_epoch = epoch
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'warmup_scheduler_state_dict': warmup_scheduler.state_dict(),
-            'main_scheduler_state_dict': main_scheduler.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'val_acc': val_acc,
             'val_f1': val_f1,
-            'train_f1': train_f1,
-            'history': history,
-            'hyperparameters': {
-                'label_smoothing': LABEL_SMOOTHING,
-                'grad_clip': GRAD_CLIP,
-                'initial_lr': INITIAL_LR,
-                'batch_size': BATCH_SIZE,
-                'hidden_dim': HIDDEN_DIM
-            }
+            'history': history
         }, MODEL_SAVE_PATH)
-        print(f'New best model saved with validation accuracy: {val_acc:.2f}% and F1: {val_f1:.4f}')
+        print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
     
-    print('-' * 80)
+    print('-' * 60)
 
-print(f"Best model was saved at epoch {best_epoch+1}")
-print(f"Best validation accuracy: {best_val_acc:.2f}%")
-print(f"Best validation F1 score: {best_val_f1:.4f}")
+print(f"Best model was saved at epoch {best_epoch+1} with validation accuracy: {best_val_acc:.2f}%")
 
 # Plot training history
 import matplotlib.pyplot as plt
 
-plt.figure(figsize=(20, 10))
+plt.figure(figsize=(20, 5))
 
 # Plot losses
-plt.subplot(2, 3, 1)
+plt.subplot(1, 4, 1)
 plt.plot(history['train_loss'], label='Train Loss')
 plt.plot(history['val_loss'], label='Val Loss')
 plt.title('Loss History')
@@ -610,7 +567,7 @@ plt.ylabel('Loss')
 plt.legend()
 
 # Plot accuracies
-plt.subplot(2, 3, 2)
+plt.subplot(1, 4, 2)
 plt.plot(history['train_acc'], label='Train Acc')
 plt.plot(history['val_acc'], label='Val Acc')
 plt.title('Accuracy History')
@@ -619,8 +576,7 @@ plt.ylabel('Accuracy (%)')
 plt.legend()
 
 # Plot F1 scores
-plt.subplot(2, 3, 3)
-plt.plot(history['train_f1'], label='Train F1')
+plt.subplot(1, 4, 3)
 plt.plot(history['val_f1'], label='Validation F1')
 plt.title('F1 Score History')
 plt.xlabel('Epoch')
@@ -628,19 +584,12 @@ plt.ylabel('F1 Score')
 plt.legend()
 
 # Plot learning rate
-plt.subplot(2, 3, 4)
+plt.subplot(1, 4, 4)
 plt.plot(history['lr'])
 plt.title('Learning Rate Schedule')
 plt.xlabel('Epoch')
 plt.ylabel('Learning Rate')
 plt.yscale('log')
-
-# Plot gradient norms
-plt.subplot(2, 3, 5)
-plt.plot(history['grad_norm'])
-plt.title('Gradient Norm History')
-plt.xlabel('Epoch')
-plt.ylabel('Gradient Norm')
 
 plt.tight_layout()
 plt.show()
