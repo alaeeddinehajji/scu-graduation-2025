@@ -61,17 +61,12 @@ VALIDATION_SPLIT = 0.2
 RANDOM_SEED = 42
 
 # Learning rate scheduler settings
-NUM_EPOCHS = 100
+NUM_EPOCHS = 100  # Will run for full 100 epochs
 WARMUP_EPOCHS = 5
 CYCLES = 3  # Number of cosine annealing cycles
 CYCLE_LEN = NUM_EPOCHS // CYCLES  # Length of each cycle
 T_MULT = 2  # Factor to increase cycle length after each cycle
 ETA_MIN = MIN_LR  # Minimum learning rate for cosine annealing
-
-# Early stopping settings
-EARLY_STOP_PATIENCE = 10
-LR_PATIENCE = 3
-LR_FACTOR = 0.5
 
 # %% [markdown]
 # ## Cell 3: Helper Functions
@@ -443,7 +438,7 @@ print(f"Number of classes: {num_classes}")
 
 # %% [markdown]
 # ## Cell 10: Model Training
-# Train the model using advanced learning rate scheduling
+# Train the model for full 100 epochs using advanced learning rate scheduling
 
 # %%
 # Train model
@@ -451,13 +446,13 @@ print("Starting training...")
 best_val_acc = 0.0
 best_epoch = 0
 scaler = GradScaler()
-patience_counter = 0
 
 # Training history
 history = {
     'train_loss': [], 'train_acc': [],
     'val_loss': [], 'val_acc': [],
-    'lr': []
+    'lr': [],
+    'val_f1': []  # Added F1 score tracking
 }
 
 for epoch in range(NUM_EPOCHS):
@@ -530,6 +525,7 @@ for epoch in range(NUM_EPOCHS):
     history['val_loss'].append(val_loss)
     history['val_acc'].append(val_acc)
     history['lr'].append(current_lr)
+    history['val_f1'].append(val_f1)
     
     # Print progress
     print(f'Epoch {epoch+1}/{NUM_EPOCHS}:')
@@ -541,16 +537,16 @@ for epoch in range(NUM_EPOCHS):
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         best_epoch = epoch
-        torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'val_acc': val_acc,
+            'val_f1': val_f1,
+            'history': history
+        }, MODEL_SAVE_PATH)
         print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
-        patience_counter = 0
-    else:
-        patience_counter += 1
-    
-    # Early stopping check
-    if patience_counter >= EARLY_STOP_PATIENCE:
-        print(f'Early stopping triggered after {epoch+1} epochs')
-        break
     
     print('-' * 60)
 
@@ -559,10 +555,10 @@ print(f"Best model was saved at epoch {best_epoch+1} with validation accuracy: {
 # Plot training history
 import matplotlib.pyplot as plt
 
-plt.figure(figsize=(15, 5))
+plt.figure(figsize=(20, 5))
 
 # Plot losses
-plt.subplot(1, 3, 1)
+plt.subplot(1, 4, 1)
 plt.plot(history['train_loss'], label='Train Loss')
 plt.plot(history['val_loss'], label='Val Loss')
 plt.title('Loss History')
@@ -571,7 +567,7 @@ plt.ylabel('Loss')
 plt.legend()
 
 # Plot accuracies
-plt.subplot(1, 3, 2)
+plt.subplot(1, 4, 2)
 plt.plot(history['train_acc'], label='Train Acc')
 plt.plot(history['val_acc'], label='Val Acc')
 plt.title('Accuracy History')
@@ -579,8 +575,16 @@ plt.xlabel('Epoch')
 plt.ylabel('Accuracy (%)')
 plt.legend()
 
+# Plot F1 scores
+plt.subplot(1, 4, 3)
+plt.plot(history['val_f1'], label='Validation F1')
+plt.title('F1 Score History')
+plt.xlabel('Epoch')
+plt.ylabel('F1 Score')
+plt.legend()
+
 # Plot learning rate
-plt.subplot(1, 3, 3)
+plt.subplot(1, 4, 4)
 plt.plot(history['lr'])
 plt.title('Learning Rate Schedule')
 plt.xlabel('Epoch')
@@ -599,7 +603,7 @@ print("Training completed")
 # %%
 # Load best model and evaluate
 print("Evaluating best model on test set...")
-model.load_state_dict(torch.load(MODEL_SAVE_PATH))
+model.load_state_dict(torch.load(MODEL_SAVE_PATH)['model_state_dict'])
 model.eval()
 
 test_correct = 0
