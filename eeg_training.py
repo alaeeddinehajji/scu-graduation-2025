@@ -178,186 +178,157 @@ def prepare_eeg_data():
 
 
 # Model Definitions
-class CNNModel(nn.Module):
-    """
-    CNN model for EEG classification.
-    
-    Structure:
-    - 1D Convolutional layers for feature extraction
-    - Batch Normalization for stable learning
-    - Max Pooling for dimension reduction
-    - Dropout for regularization
-    - Fully connected layers for classification
-    """
-    def __init__(self, num_classes: int = 7, input_channels: int = 8):
-        super(CNNModel, self).__init__()
-        
-        # First convolutional block
-        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm1d(32)
-        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # Second convolutional block
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # Third convolutional block
-        self.conv3 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
-        self.bn3 = nn.BatchNorm1d(128)
-        self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # Calculate the output size after the three pooling layers
-        # Input size: (batch_size, 8, 100)
-        # After 3 pooling layers with stride 2: 100 -> 50 -> 25 -> 12
-        self.flatten_size = 128 * 12
-        
-        # Fully connected layers
-        self.fc1 = nn.Linear(self.flatten_size, 256)
-        self.dropout1 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256, num_classes)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, time_steps, channels)
-        # Reshape for 1D convolution (batch_size, channels, time_steps)
+class CNN1D(nn.Module):
+    def __init__(self, win_size: int, num_channels: int, num_classes: int):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Conv1d(num_channels, 128, kernel_size=5, padding=2),  # Increased filters
+            nn.BatchNorm1d(128),  # Added batch norm
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),  # Added extra layer
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            
+            nn.Conv1d(256, 512, kernel_size=3, padding=1),  # Deeper architecture
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),  # Better than fixed pooling
+            
+            nn.Flatten(),
+            nn.Dropout(0.5),  # Increased dropout
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_classes)
+        )
+
+    def forward(self, x):
+        # Permute to (batch_size, channels, time_steps)
         x = x.permute(0, 2, 1)
-        
-        # Convolutional blocks
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.pool1(x)
-        
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = self.pool2(x)
-        
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = self.pool3(x)
-        
-        # Flatten for fully connected layers
-        x = x.view(-1, self.flatten_size)
-        
-        # Fully connected layers
-        x = F.relu(self.fc1(x))
-        x = self.dropout1(x)
-        x = self.fc2(x)
-        
-        return x
+        return self.model(x)
 
 
 class LSTMModel(nn.Module):
-    """
-    LSTM model for EEG classification.
-    
-    Structure:
-    - LSTM layers for sequence modeling
-    - Dropout for regularization
-    - Fully connected layer for classification
-    """
-    def __init__(self, num_classes: int = 7, input_channels: int = 8, hidden_size: int = 128, num_layers: int = 2):
+    def __init__(self, win_size, num_channels, num_classes):
         super(LSTMModel, self).__init__()
-        
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        
-        # LSTM layers
-        self.lstm = nn.LSTM(
-            input_size=input_channels,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=0.2 if num_layers > 1 else 0,
-            bidirectional=True
-        )
-        
-        # Fully connected layer for classification
-        self.fc = nn.Linear(hidden_size * 2, num_classes)  # *2 for bidirectional
-        self.dropout = nn.Dropout(0.5)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, time_steps, channels)
-        
-        # LSTM forward pass
-        lstm_out, _ = self.lstm(x)
-        
-        # We use the output from the last time step for classification
-        # For bidirectional, concatenated output
-        lstm_out = lstm_out[:, -1, :]
-        
-        # Dropout before final layer
-        lstm_out = self.dropout(lstm_out)
-        
-        # Final classification layer
-        out = self.fc(lstm_out)
-        
-        return out
+
+        self.lstm1 = nn.LSTM(input_size=num_channels, hidden_size=64, batch_first=True, bidirectional=False)
+        self.drop1 = nn.Dropout(0.2)  # Apply dropout after first LSTM
+        self.lstm2 = nn.LSTM(input_size=64, hidden_size=64, batch_first=True, bidirectional=False)
+        self.drop2 = nn.Dropout(0.2)  # Apply dropout after second LSTM
+
+        self.fc1 = nn.Linear(64, 128)
+        self.drop_fc = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x, _ = self.lstm1(x)
+        x = self.drop1(x)
+        x, _ = self.lstm2(x)
+        x = self.drop2(x)
+
+        x = x[:, -1, :]  # Take only the last time step output
+        x = F.relu(self.fc1(x))
+        x = self.drop_fc(x)
+        x = self.fc2(x)
+
+        return x
 
 
 class CNNLSTMModel(nn.Module):
-    """
-    Hybrid CNN-LSTM model for EEG classification.
-    
-    Structure:
-    - 1D Convolutional layers for feature extraction
-    - LSTM layers for sequence modeling
-    - Fully connected layer for classification
-    """
-    def __init__(self, num_classes: int = 7, input_channels: int = 8, hidden_size: int = 128):
+    def __init__(self, win_size, num_channels, num_classes):
         super(CNNLSTMModel, self).__init__()
-        
-        # CNN feature extraction
-        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(32)
-        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # Calculate the size after CNN
-        self.cnn_output_size = 64  # Number of channels after CNN
-        self.seq_length_after_cnn = 25  # 100 -> 50 -> 25 after max pooling
-        
-        # LSTM sequence modeling
-        self.lstm = nn.LSTM(
-            input_size=self.cnn_output_size,
-            hidden_size=hidden_size,
-            num_layers=2,
-            batch_first=True,
-            dropout=0.2,
-            bidirectional=True
+       
+        # --- CNN Block ---
+        self.cnn_block = nn.Sequential(
+            nn.Conv1d(num_channels, 128, kernel_size=5, padding=2),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Dropout(0.2),
+           
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Dropout(0.3),
         )
-        
-        # Fully connected layers
-        self.fc = nn.Linear(hidden_size * 2, num_classes)  # *2 for bidirectional
-        self.dropout = nn.Dropout(0.5)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch_size, time_steps, channels)
-        # Reshape for 1D convolution (batch_size, channels, time_steps)
+       
+        # --- Attention Layer ---
+        self.attention = nn.Sequential(
+            nn.Conv1d(256, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+       
+        # --- LSTM Block (Fixed Dropout) ---
+        self.lstm1 = nn.LSTM(
+            input_size=256,
+            hidden_size=128,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0  # Fixed: Set to 0 for a single-layer LSTM
+        )
+       
+        self.lstm2 = nn.LSTM(
+            input_size=256,  # 128*2 due to bidirectional
+            hidden_size=128,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0  # Fixed: Set to 0 for a single-layer LSTM
+        )
+       
+        # --- Fully Connected Layers ---
+        self.fc_block = nn.Sequential(
+            nn.Linear(256, 512),  # 128*2 due to bidirectional
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(256, num_classes)
+        )
+       
+    def forward(self, x):
+        # Reshape input for CNN: (batch_size, channels, time_steps)
         x = x.permute(0, 2, 1)
-        
+           
         # CNN feature extraction
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.pool1(x)
-        
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = self.pool2(x)
-        
-        # Reshape for LSTM (batch_size, seq_length, features)
-        x = x.permute(0, 2, 1)
-        
-        # LSTM sequence modeling
-        lstm_out, _ = self.lstm(x)
-        
-        # Use output from the last time step
-        lstm_out = lstm_out[:, -1, :]
-        
-        # Dropout
-        lstm_out = self.dropout(lstm_out)
-        
+        cnn_features = self.cnn_block(x)
+       
+        # Apply attention to CNN features
+        attention_weights = self.attention(cnn_features)
+        attended_features = cnn_features * attention_weights
+       
+        # Reshape for LSTM: (batch, time, features)
+        lstm_input = attended_features.permute(0, 2, 1)
+       
+        # LSTM processing
+        lstm_out1, _ = self.lstm1(lstm_input)
+        lstm_out2, _ = self.lstm2(lstm_out1)
+       
+        # Global context representation (max + avg pooling)
+        max_pool = torch.max(lstm_out2, dim=1)[0]
+        avg_pool = torch.mean(lstm_out2, dim=1)
+        combined_features = max_pool + avg_pool
+       
         # Final classification
-        out = self.fc(lstm_out)
-        
-        return out
+        output = self.fc_block(combined_features)
+       
+        return output
+   
+    def initialize_weights(self):
+        """Initialize model weights for better convergence"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.constant_(m.bias, 0)
 
 
 # Training and Evaluation Functions
@@ -550,7 +521,7 @@ def main():
     
     # Train CNN model
     print_color("\nTraining CNN Model...", "magenta")
-    cnn_model = CNNModel(num_classes=num_classes).to(device)
+    cnn_model = CNN1D(win_size=100, num_channels=8, num_classes=num_classes).to(device)
     cnn_optimizer = optim.Adam(cnn_model.parameters(), lr=LEARNING_RATE)
     
     start_time = time.time()
@@ -569,7 +540,7 @@ def main():
     
     # Train LSTM model
     print_color("\nTraining LSTM Model...", "magenta")
-    lstm_model = LSTMModel(num_classes=num_classes).to(device)
+    lstm_model = LSTMModel(win_size=100, num_channels=8, num_classes=num_classes).to(device)
     lstm_optimizer = optim.Adam(lstm_model.parameters(), lr=LEARNING_RATE)
     
     start_time = time.time()
@@ -588,7 +559,8 @@ def main():
     
     # Train CNN-LSTM hybrid model
     print_color("\nTraining CNN-LSTM Hybrid Model...", "magenta")
-    cnn_lstm_model = CNNLSTMModel(num_classes=num_classes).to(device)
+    cnn_lstm_model = CNNLSTMModel(win_size=100, num_channels=8, num_classes=num_classes).to(device)
+    cnn_lstm_model.initialize_weights()
     cnn_lstm_optimizer = optim.Adam(cnn_lstm_model.parameters(), lr=LEARNING_RATE)
     
     start_time = time.time()
