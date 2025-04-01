@@ -1,0 +1,4 @@
+1 processing data:
+The results demonstrate that the preprocessing framework effectively converts raw 8-channel EMG and EEG data into structured, machine learning-ready datasets. Through a detailed validation process, it was confirmed that the integrity of the data is maintained throughout the processing pipeline. The processed EMG and EEG data retain their original structure, with proper alignment of metadata (subject ID, repetition number, and gesture ID), making the datasets suitable for further analysis in gesture recognition applications. The data validation, visualized through comparison plots, ensures that the preprocessing steps do not introduce errors or distortions, ultimately resulting in high-quality datasets ready for machine learning model training.
+
+2 emg

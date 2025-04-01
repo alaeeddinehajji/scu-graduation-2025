@@ -1,0 +1,233 @@
+# Jupyter Notebook Analysis Report: EMG/EEG Data Processing Framework
+
+## Overview
+This Jupyter notebook implements a comprehensive preprocessing framework for 8-channel EMG (electromyography) and EEG (electroencephalography) data collected from a Thalmic Labs Myo Armband and OpenBCI device. The notebook processes raw recordings into curated CSV datasets formatted for machine learning applications in gesture recognition research.
+
+## Data Source
+- Mendeley Data Repository (DOI: 10.17632/m6t78vngbt.1)
+- URL: https://data.mendeley.com/datasets/m6t78vngbt/1
+
+## Key Components
+
+### 1. Setup and Configuration
+- Imports necessary libraries: NumPy, Pandas, PyTorch, Matplotlib, scikit-learn
+- Configures paths for input and output directories
+- Sets up device configuration (CPU/GPU)
+
+### 2. Data Inspection Functions
+- `parse_filename()`: Extracts subject ID, repetition number, and gesture ID from filenames
+- `get_random_file()`: Selects random matching EMG and EEG files
+- `load_emg_data()` and `load_eeg_data()`: Load data from CSV files
+- Visualization functions for both EMG and EEG data
+
+### 3. Data Processing Pipeline
+- `collect_files()`: Scans directories to find all valid CSV files
+- `process_data()`: Processes files using provided processing functions
+- `save_and_convert_data()`: Aggregates and saves processed data
+- Specific processing functions for EMG and EEG data
+
+### 4. Data Validation
+- `validate_emg_processing()`: Validates EMG data processing
+- `validate_eeg_processing()`: Validates EEG data processing
+- Compares raw and processed data structures
+- Visualizes data integrity through plots
+
+## Workflow
+1. The notebook first sets up the environment and imports necessary libraries
+2. It then provides functions to inspect and visualize sample EMG/EEG data
+3. The main processing pipeline collects, processes, and aggregates all data files
+4. Processed data is saved to CSV files and converted to PyTorch tensors
+5. Validation functions compare raw and processed data to ensure integrity
+
+## Output Files
+- `EMG-data.csv`: Processed EMG data with subject, repetition, and gesture metadata
+- `EEG-data.csv`: Processed EEG data with subject, repetition, and gesture metadata
+
+## Data Dimensions
+The notebook processes data from 10 subjects, with multiple repetitions and gestures:
+- EMG Features: Shape information available in the output (timepoints × channels)
+- EEG Features: Shape information available in the output (timepoints × channels)
+
+## Validation Results
+The notebook includes visual validation comparing raw and processed data for both EMG and EEG, confirming that the processing pipeline maintains data integrity.
+
+This framework provides a complete pipeline from raw EMG/EEG recordings to machine learning-ready datasets for gesture recognition applications.
+
+# EMG Gesture Classification Notebook Analysis
+
+## Overview
+This Jupyter notebook (`2_emg_training.ipynb`) implements and compares three deep learning architectures for classifying hand gestures from electromyography (EMG) signals. The notebook builds on preprocessed data from a previous notebook (`1_process_data.ipynb`).
+
+## Deep Learning Architectures Used
+1. **1D Convolutional Neural Network (CNN)**: Extracts spatial features from EMG channels
+2. **Long Short-Term Memory (LSTM)**: Captures temporal dependencies in signal sequences
+3. **Hybrid CNN-LSTM Model**: Combines spatial feature extraction with temporal modeling
+
+## Dataset Information
+- Data is loaded from `data/processed/EMG-data.csv`
+- Contains 664,666 rows with 11 columns
+- 8 EMG channels (Channel_1 through Channel_8)
+- Additional columns: subject, repetition, gesture
+- 7 unique gestures (zero-indexed, 0-6)
+- 10 unique subjects (1, 2, 3, 4, 5, 7, 8, 9, 10, 11)
+- No null values in the dataset
+
+## Data Preparation
+- Gesture labels are adjusted to be zero-indexed
+- Data is normalized (mean: -1.4992, std: 22.8343, min: -128, max: 127)
+- Data is split into training, validation, and test sets
+
+## Model Training
+The notebook trains all three models with the following workflow:
+1. Define model architectures
+2. Train models for 100 epochs
+3. Evaluate on validation data during training
+4. Final evaluation on test data
+5. Generate classification reports and confusion matrices
+
+## Results
+The notebook shows training progress for all three models, with the hybrid CNN-LSTM model achieving:
+- Test accuracy: 96.24%
+- Test loss: 0.1903
+- High precision and recall across all gesture classes
+- Particularly strong performance on gesture class 6 (100% recall)
+- Slightly lower performance on gesture class 3 (86% recall)
+
+## Visualization
+The notebook includes visualization capabilities:
+- Plotting EMG channel data
+- Comparative plots of training and validation metrics (accuracy and loss) for all three models
+- Confusion matrices for model evaluation
+
+## Conclusion
+The notebook concludes with a template for summarizing the best-performing model, though the final values for best model name and accuracy are not filled in. The conclusion suggests future work including transfer learning, real-time implementation, attention mechanisms, and additional signal processing techniques.
+
+## Technical Details
+- Uses PyTorch for deep learning implementation
+- Runs on CUDA GPU if available
+- Implements proper random seed setting for reproducibility
+- Includes helper functions for visualization and evaluation
+
+# EEG-Based Gesture Classification Analysis Report
+
+## Overview
+This notebook implements (`3_eeg_training.ipynb`) and compares deep learning approaches for classifying gestures from EEG signals. The implementation focuses on a CNN-LSTM hybrid model for processing EEG data, which has applications in brain-computer interfaces, neurofeedback, and assistive technologies.
+
+## Dataset
+- The dataset contains EEG recordings with 8 channels (Channel_1 through Channel_8)
+- Data includes subject IDs, repetition numbers, and gesture labels (adjusted to be zero-indexed)
+- 10 unique subjects (IDs: 1, 2, 3, 4, 5, 6, 8, 9, 10, 11)
+- 7 unique gestures (labeled 0-6)
+- Total dataset size: 564,641 rows × 11 columns
+
+## Data Preprocessing
+1. **Windowing**: 
+   - Window size: 100 samples
+   - Step size: 50 samples (overlapping windows)
+   - Resulted in 11,284 windowed samples
+
+2. **Normalization**:
+   - Data standardized to zero mean and unit variance
+   - After normalization: Mean ≈ 0.0, Std ≈ 1.0
+   - Min value: -4.1853, Max value: 2.2414
+
+3. **Data Split**:
+   - Train set: 7,221 samples (64%)
+   - Validation set: 1,806 samples (16%)
+   - Test set: 2,257 samples (20%)
+   - Stratified sampling used to maintain class distribution
+
+## Model Architecture
+The notebook implements a CNN-LSTM hybrid model with the following components:
+
+1. **CNN Block**:
+   - Two convolutional layers (128 → 256 filters)
+   - Batch normalization and ReLU activation
+   - Max pooling and dropout for regularization
+
+2. **Attention Layer**:
+   - 1D convolution with sigmoid activation to focus on important features
+
+3. **LSTM Block**:
+   - Two bidirectional LSTM layers (128 hidden units each)
+   - Processes temporal patterns in the data
+
+4. **Fully Connected Layers**:
+   - Three dense layers (256 → 512 → 256 → num_classes)
+   - ReLU activation and dropout for regularization
+
+## Training Configuration
+- Batch size: 64
+- Learning rate: 0.001
+- Optimizer: Adam
+- Loss function: Cross-entropy
+- Epochs: 100
+- Device: CUDA (GPU)
+
+## Training Results
+The CNN-LSTM model showed strong performance:
+- Training accuracy increased from ~45% to ~88% over 100 epochs
+- Validation accuracy improved from ~56% to ~86-93% (with some fluctuation)
+- Best validation accuracy: ~93.47% (epoch 93)
+- Training completed in approximately 261 seconds
+
+## Observations
+1. The model showed rapid improvement in the first 15-20 epochs
+2. Some overfitting appeared in later epochs (training accuracy continued to improve while validation accuracy plateaued)
+3. Validation accuracy showed fluctuations, suggesting the model might benefit from learning rate scheduling or early stopping
+4. The CNN-LSTM architecture effectively captured both spatial and temporal patterns in the EEG data
+
+## Conclusion
+The hybrid CNN-LSTM model with attention mechanism demonstrated effective performance for EEG-based gesture classification. The architecture successfully leverages both spatial features (via CNN) and temporal dependencies (via LSTM) in the EEG signals, making it suitable for brain-computer interface applications.
+
+
+# Multimodal EMG-EEG Gesture Classification Analysis
+
+## Overview
+This notebook implements (`4_multimodal_training.ipynb`) a deep learning approach that combines Electromyography (EMG) and Electroencephalography (EEG) data for gesture classification. The model uses a late fusion architecture to integrate information from both modalities, achieving high classification accuracy.
+
+## Data and Preprocessing
+- **Data Sources**: EMG and EEG data from CSV files
+- **Preprocessing**:
+  - Standardization of features using `StandardScaler`
+  - Windowing approach with window size of 200 samples
+  - Time alignment with a delta of 35ms between EMG and EEG signals
+  - Data split: 80% training (with 20% of that for validation) and 20% test
+
+## Model Architecture
+The model uses a **Late Fusion CNN** approach with:
+- **Separate CNN branches** for EMG and EEG modalities
+- Each branch contains:
+  - Multiple convolutional layers with batch normalization
+  - ReLU activation and max pooling
+  - Dropout for regularization
+- **Fusion Strategy**: Feature concatenation followed by fully connected layers
+- **Classification Head**: Multiple linear layers with layer normalization
+
+## Training Configuration
+- **Batch Size**: 32
+- **Learning Rate**: Starting at 0.001 with cosine annealing warm restarts
+- **Epochs**: 50 with 5 warmup epochs
+- **Optimization**: AdamW with weight decay of 1e-5
+- **Regularization**: Gradient clipping at 1.0, label smoothing at 0.1
+- **Mixed Precision**: Used for faster training
+
+## Results
+- **Test Accuracy**: 99.23%
+- **Test F1 Score**: 0.9922
+- **Confusion Matrix**: Shows near-perfect classification across all 7 gesture classes
+- **Training Progression**: Rapid improvement in early epochs, reaching >95% validation accuracy by epoch 15
+
+## Key Findings
+1. The multimodal approach outperforms single-modality models
+2. Late fusion effectively combines complementary information from muscle activity (EMG) and brain signals (EEG)
+3. The model shows excellent generalization to unseen test data
+4. The learning rate scheduling strategy helps achieve stable convergence
+
+## Future Work Suggestions
+- Explore earlier fusion strategies
+- Implement attention mechanisms between modalities
+- Develop subject-independent training approaches
+- Create real-time implementations for BCI applications
+
+The notebook includes comprehensive visualizations of training metrics including accuracy, loss, F1 score, and learning rate schedules.
