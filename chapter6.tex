@@ -1,0 +1,21 @@
+\begin{table}[htbp]
+\centering
+\caption{Performance Comparison of EMG-Based Deep Learning Models}
+\label{tab:emg-models-comparison}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Model} & \textbf{Validation} & \textbf{Test} & \textbf{Best} & \textbf{Training} & \textbf{Notable} \\
+\textbf{Architecture} & \textbf{Accuracy (\%)} & \textbf{Accuracy (\%)} & \textbf{Epoch} & \textbf{Time*} & \textbf{Characteristics} \\
+\hline
+1D-CNN & 97.29 & 96.85 & 40 & Fast & Strong spatial feature extraction, \\
+ & & & & & quick initial convergence \\
+\hline
+LSTM & 96.99 & 95.73 & 60 & Moderate & Good temporal dependency modeling, \\
+ & & & & & slower convergence rate \\
+\hline
+Hybrid CNN-LSTM & 96.54 & 96.24 & 50 & Moderate & Balanced spatial-temporal features, \\
+ & & & & & stable validation metrics \\
+\hline
+\multicolumn{6}{l}{\small *Training time is relative comparison based on epochs to convergence} \\
+\end{tabular}
+\end{table} 
